@@ -1,0 +1,8 @@
+[project]
+name = "finias"
+version = "0.1.0"
+description = "Financial Intelligence Agency System — an agentic AI trading firm"
+requires-python = ">=3.11"
+
+[project.scripts]
+finias = "finias.interface.cli:run"

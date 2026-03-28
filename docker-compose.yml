@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: finias-postgres
+    environment:
+      POSTGRES_DB: finias_agency
+      POSTGRES_USER: finias_agency
+      POSTGRES_PASSWORD: finias
+    ports:
+      - "5434:5432"
+    volumes:
+      - finias_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finias_agency -d finias_agency"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: finias-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - finias_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  finias_pgdata:
+  finias_redis:
