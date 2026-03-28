@@ -85,6 +85,7 @@ class RegimeAssessment:
     key_levels: dict = field(default_factory=dict)
 
     assessed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    consistency_warnings: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -122,7 +123,305 @@ class RegimeAssessment:
                 "inflation": self.inflation,
             },
             "assessed_at": self.assessed_at.isoformat(),
+            "consistency_warnings": self.consistency_warnings,
         }
+
+    def to_downstream_context(self) -> "MacroContext":
+        """
+        Generate a clean macro context for downstream agent consumption.
+
+        This is the primary interface other agents use to understand
+        the macro environment. It extracts actionable fields from
+        the full regime assessment.
+        """
+        # Determine sector guidance from cycle phase and regime
+        favor_cyclicals = (
+            self.cycle_phase in ("early_cycle", "mid_cycle") and
+            self.primary_regime != MarketRegime.RISK_OFF and
+            self.liquidity_regime in ("ample", "adequate")
+        )
+        favor_defensives = (
+            self.cycle_phase in ("late_cycle", "recession") or
+            self.primary_regime in (MarketRegime.RISK_OFF, MarketRegime.CRISIS) or
+            self.stress_index > 0.5
+        )
+
+        # Rate environment from monetary policy data
+        fed_funds = self.key_levels.get("fed_funds", 0)
+        neutral_rate = 2.75
+        rate_gap = fed_funds - neutral_rate if fed_funds else 0
+        if rate_gap > 1.0:
+            rate_env = "restrictive"
+        elif rate_gap < -0.5:
+            rate_env = "accommodative"
+        else:
+            rate_env = "neutral"
+
+        # Implied rate direction from forward rates
+        yc_data = self.yield_curve
+        fwd_rates = yc_data.get("forward_rates", {}) if isinstance(yc_data, dict) else {}
+        implied_change_bp = fwd_rates.get("implied_policy_change_1y_bp", 0) or 0
+
+        if implied_change_bp < -50:
+            implied_direction = "cuts_expected"
+        elif implied_change_bp > 50:
+            implied_direction = "hikes_expected"
+        else:
+            implied_direction = "stable"
+
+        favor_duration = implied_direction == "cuts_expected"
+
+        # Liquidity
+        mp_data = self.monetary_policy if isinstance(self.monetary_policy, dict) else {}
+        liq_data = mp_data.get("liquidity", {})
+        liq_trend = liq_data.get("trend", "unknown")
+        net_liq = liq_data.get("net_liquidity", 0) or 0
+        liquidity_supportive = liq_trend in ("expanding", "stable")
+
+        # Volatility
+        vol_data = self.volatility if isinstance(self.volatility, dict) else {}
+        ts_data = vol_data.get("term_structure", {})
+        vrp_data = vol_data.get("vrp", {})
+        vol_persistent = ts_data.get("shape", "unknown") == "backwardation"
+        vrp_regime = vrp_data.get("vrp_regime", "unknown")
+
+        # Risk flags
+        ca_data = self.cross_asset if isinstance(self.cross_asset, dict) else {}
+        credit_data = ca_data.get("credit", {})
+        sb_data = ca_data.get("stock_bond_correlation", {})
+
+        # Business cycle
+        bc_data = self.business_cycle if isinstance(self.business_cycle, dict) else {}
+        sahm_data = bc_data.get("sahm_rule", {})
+        activity_data = bc_data.get("activity", {})
+
+        # Breadth
+        br_data = self.breadth if isinstance(self.breadth, dict) else {}
+
+        # Run consistency checks
+        warnings = _validate_consistency(
+            self.composite_score,
+            self.growth_cycle_score,
+            self.monetary_liquidity_score,
+            self.inflation_score,
+            self.market_signals_score,
+            self.primary_regime,
+            self.cycle_phase,
+            self.key_levels,
+        )
+
+        return MacroContext(
+            regime=self.primary_regime.value,
+            cycle_phase=self.cycle_phase,
+            binding_constraint=self.binding_constraint,
+            composite_score=self.composite_score,
+            confidence=self.confidence,
+            stress_index=self.stress_index,
+            favor_cyclicals=favor_cyclicals,
+            favor_defensives=favor_defensives,
+            favor_duration=favor_duration,
+            rate_environment=rate_env,
+            implied_rate_direction=implied_direction,
+            implied_policy_change_bp=implied_change_bp,
+            liquidity_supportive=liquidity_supportive,
+            net_liquidity_trillion=net_liq / 1_000_000 if net_liq > 1000 else net_liq,
+            volatility_regime=self.volatility_regime,
+            vol_persistent=vol_persistent,
+            vrp_regime=vrp_regime,
+            credit_stress=credit_data.get("stress", False),
+            risk_parity_stress=sb_data.get("risk_parity_stress", False),
+            recession_probability=self.key_levels.get("recession_prob", 0) or 0,
+            sahm_distance_to_trigger=sahm_data.get("distance_to_trigger", 0) or 0,
+            breadth_health=br_data.get("breadth_health", "unknown"),
+            vix_level=self.key_levels.get("vix", 0) or 0,
+            hy_spread=self.key_levels.get("hy_spread", 0) or 0,
+            fed_funds=fed_funds or 0,
+            core_pce_yoy=self.key_levels.get("core_pce_yoy", 0) or 0,
+            gdp_nowcast=activity_data.get("gdp_nowcast"),
+            consistency_warnings=warnings,
+        )
+
+
+@dataclass
+class MacroContext:
+    """
+    Simplified macro context for downstream agent consumption.
+
+    This is the interface contract between the Macro Strategist and all other agents.
+    Instead of parsing 2000+ lines of raw regime JSON, downstream agents consume
+    this clean, structured summary of what matters for their decision-making.
+
+    Generated by RegimeAssessment.to_downstream_context() — always derived from
+    the full assessment, never stored or computed separately.
+    """
+    # Regime classification
+    regime: str                         # risk_on, risk_off, transition, crisis
+    cycle_phase: str                    # early_cycle, mid_cycle, late_cycle, recession
+    binding_constraint: str             # inflation, growth_cycle, monetary_liquidity, market_signals
+    composite_score: float              # -1 to +1 (negative = bearish, positive = bullish)
+    confidence: float                   # 0 to 1
+    stress_index: float                 # 0 to 1 (>0.5 elevated, >0.8 crisis)
+
+    # Actionable context for sector/stock selection
+    favor_cyclicals: bool               # True if early/mid cycle with adequate liquidity
+    favor_defensives: bool              # True if late cycle, risk-off, or high stress
+    favor_duration: bool                # True if rates expected to fall (cuts priced)
+
+    # Rate & liquidity environment
+    rate_environment: str               # restrictive, neutral, accommodative
+    implied_rate_direction: str         # cuts_expected, stable, hikes_expected
+    implied_policy_change_bp: float     # Forward rate minus fed funds (positive = hikes priced)
+    liquidity_supportive: bool          # True if net liquidity trend is expanding or stable
+    net_liquidity_trillion: float       # Current net liquidity in trillions
+
+    # Volatility context
+    volatility_regime: str              # low, normal, elevated, extreme
+    vol_persistent: bool                # True if VIX term structure in backwardation
+    vrp_regime: str                     # normal, compressed, flat, negative
+
+    # Risk flags
+    credit_stress: bool                 # True if HY spread > 500bp
+    risk_parity_stress: bool            # True if stocks and bonds falling together
+    recession_probability: float        # 0 to 1
+    sahm_distance_to_trigger: float     # How far from 0.50 threshold
+    breadth_health: str                 # strong, healthy, weakening, poor
+
+    # Key levels for risk management thresholds
+    vix_level: float
+    hy_spread: float
+    fed_funds: float
+    core_pce_yoy: float
+    gdp_nowcast: Optional[float]        # None if not available
+
+    # Consistency
+    consistency_warnings: list          # Any internal contradictions detected
+
+    def to_dict(self) -> dict:
+        return {
+            "regime": self.regime,
+            "cycle_phase": self.cycle_phase,
+            "binding_constraint": self.binding_constraint,
+            "composite_score": self.composite_score,
+            "confidence": self.confidence,
+            "stress_index": self.stress_index,
+            "sector_guidance": {
+                "favor_cyclicals": self.favor_cyclicals,
+                "favor_defensives": self.favor_defensives,
+                "favor_duration": self.favor_duration,
+            },
+            "rates_and_liquidity": {
+                "rate_environment": self.rate_environment,
+                "implied_rate_direction": self.implied_rate_direction,
+                "implied_policy_change_bp": self.implied_policy_change_bp,
+                "liquidity_supportive": self.liquidity_supportive,
+                "net_liquidity_trillion": self.net_liquidity_trillion,
+            },
+            "volatility": {
+                "regime": self.volatility_regime,
+                "persistent": self.vol_persistent,
+                "vrp_regime": self.vrp_regime,
+            },
+            "risk_flags": {
+                "credit_stress": self.credit_stress,
+                "risk_parity_stress": self.risk_parity_stress,
+                "recession_probability": self.recession_probability,
+                "sahm_distance_to_trigger": self.sahm_distance_to_trigger,
+                "breadth_health": self.breadth_health,
+            },
+            "key_levels": {
+                "vix": self.vix_level,
+                "hy_spread": self.hy_spread,
+                "fed_funds": self.fed_funds,
+                "core_pce_yoy": self.core_pce_yoy,
+                "gdp_nowcast": self.gdp_nowcast,
+            },
+            "consistency_warnings": self.consistency_warnings,
+        }
+
+
+def _validate_consistency(
+    composite: float,
+    growth: float,
+    monetary: float,
+    inflation: float,
+    market: float,
+    regime: MarketRegime,
+    cycle_phase: str,
+    key_levels: dict,
+) -> list[str]:
+    """
+    Check regime assessment for internal contradictions.
+
+    Returns a list of warning strings. Empty list = internally consistent.
+    These warnings are informational — they don't change the assessment.
+    They tell downstream consumers how much to trust the composite.
+    """
+    warnings = []
+
+    scores = {"growth": growth, "monetary": monetary, "inflation": inflation, "market": market}
+
+    # Check 1: Composite direction vs category majority
+    positive_count = sum(1 for s in scores.values() if s > 0.05)
+    negative_count = sum(1 for s in scores.values() if s < -0.05)
+
+    if composite > 0.1 and negative_count >= 3:
+        warnings.append(
+            f"Composite is positive ({composite:.3f}) but {negative_count}/4 categories are negative. "
+            f"Positive composite may be driven by a single strong category."
+        )
+    elif composite < -0.1 and positive_count >= 3:
+        warnings.append(
+            f"Composite is negative ({composite:.3f}) but {positive_count}/4 categories are positive. "
+            f"Negative composite may be driven by a single strongly negative category."
+        )
+
+    # Check 2: Regime vs Sahm Rule
+    sahm = key_levels.get("sahm_value", 0) or 0
+    recession_prob = key_levels.get("recession_prob", 0) or 0
+    if sahm > 0.40 and regime == MarketRegime.RISK_ON:
+        warnings.append(
+            f"Regime is risk_on but Sahm Rule at {sahm:.3f} (approaching 0.50 trigger). "
+            f"Risk-on classification may be premature."
+        )
+
+    # Check 3: Growth score vs GDPNow
+    gdp = key_levels.get("gdp_nowcast")
+    if gdp is not None:
+        if gdp > 3.0 and growth < -0.3:
+            warnings.append(
+                f"GDPNow at {gdp:.1f}% (strong growth) but growth_cycle_score is {growth:.3f} (bearish). "
+                f"Sahm Rule penalty may be overriding positive growth signals."
+            )
+        elif gdp < 1.0 and growth > 0.3:
+            warnings.append(
+                f"GDPNow at {gdp:.1f}% (weak growth) but growth_cycle_score is {growth:.3f} (bullish). "
+                f"Growth score may be lagging reality."
+            )
+
+    # Check 4: Cycle phase vs recession probability
+    if cycle_phase in ("early_cycle", "mid_cycle") and recession_prob > 0.40:
+        warnings.append(
+            f"Classified as {cycle_phase} but recession probability is {recession_prob:.0%}. "
+            f"Cycle classification may be stale."
+        )
+
+    # Check 5: Inflation binding but inflation regime is "stable" or "disinflation"
+    infl_regime_key = key_levels.get("core_pce_yoy", 0) or 0
+    if inflation < -0.3 and infl_regime_key < 2.5:
+        warnings.append(
+            f"Inflation score is strongly negative ({inflation:.3f}) suggesting overheating, "
+            f"but core PCE at {infl_regime_key:.1f}% is near target. Check inflation score logic."
+        )
+
+    # Check 6: High stress but risk_on regime
+    stress = key_levels.get("vix", 0) or 0
+    if stress > 30 and regime == MarketRegime.RISK_ON:
+        warnings.append(
+            f"VIX at {stress:.1f} (above 30) but regime is risk_on. "
+            f"Stress may not be fully reflected in the composite."
+        )
+
+    return warnings
 
 
 # Default weights — used when dynamic weighting data isn't available yet
@@ -207,6 +506,12 @@ def detect_regime(
         monetary_policy, business_cycle, inflation_analysis
     )
 
+    # === Step 7: Consistency Validation ===
+    consistency_warnings = _validate_consistency(
+        composite, growth_score, monetary_score, infl_score, market_score,
+        primary_regime, cycle, key_levels,
+    )
+
     return RegimeAssessment(
         primary_regime=primary_regime,
         cycle_phase=cycle,
@@ -233,6 +538,7 @@ def detect_regime(
         business_cycle=business_cycle.to_dict() if business_cycle else {},
         inflation=inflation_analysis.to_dict() if inflation_analysis else {},
         key_levels=key_levels,
+        consistency_warnings=consistency_warnings,
     )
 
 

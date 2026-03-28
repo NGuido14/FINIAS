@@ -607,6 +607,21 @@ async def check_computations(cache: MarketDataCache):
                f"monetary={regime.monetary_liquidity_score:.3f}, "
                f"inflation={regime.inflation_score:.3f}, "
                f"market={regime.market_signals_score:.3f}")
+            # Downstream context
+            ctx = regime.to_downstream_context()
+            ok(f"  DOWNSTREAM CONTEXT:")
+            ok(f"    Sector: favor_cyclicals={ctx.favor_cyclicals}, favor_defensives={ctx.favor_defensives}, favor_duration={ctx.favor_duration}")
+            ok(f"    Rates: environment={ctx.rate_environment}, implied_direction={ctx.implied_rate_direction}, change={ctx.implied_policy_change_bp:.0f}bp")
+            ok(f"    Liquidity: supportive={ctx.liquidity_supportive}, net_liq={ctx.net_liquidity_trillion:.2f}T")
+            ok(f"    Vol: persistent={ctx.vol_persistent}, vrp={ctx.vrp_regime}")
+            ok(f"    Risk: credit_stress={ctx.credit_stress}, rp_stress={ctx.risk_parity_stress}, recession_prob={ctx.recession_probability:.0%}")
+            if ctx.gdp_nowcast is not None:
+                ok(f"    GDPNow: {ctx.gdp_nowcast:.1f}%")
+            if ctx.consistency_warnings:
+                for w in ctx.consistency_warnings:
+                    warn(f"    CONSISTENCY: {w}")
+            else:
+                ok(f"    Consistency: ALL CHECKS PASSED")
     except Exception as e:
         fail(f"Regime Detection: {e}")
         import traceback
