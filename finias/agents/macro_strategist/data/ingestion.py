@@ -58,4 +58,13 @@ async def refresh_macro_data(cache: MarketDataCache, lookback_days: int = 365) -
             status["fred"][series_id] = {"ok": False, "error": str(e)}
             logger.error(f"Failed to refresh {series_id}: {e}")
 
+    # Populate the macro data matrix
+    try:
+        matrix_count = await cache.populate_macro_matrix()
+        status["matrix"] = {"ok": True, "dates_populated": matrix_count}
+        logger.info(f"Macro matrix populated: {matrix_count} dates")
+    except Exception as e:
+        status["matrix"] = {"ok": False, "error": str(e)}
+        logger.error(f"Failed to populate macro matrix: {e}")
+
     return status

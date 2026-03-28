@@ -213,30 +213,53 @@ def _compute_net_liquidity_series(
     """
     Net Liquidity = Fed Total Assets - TGA - Reverse Repo
 
-    Aligns series by date and computes the net liquidity time series.
+    Uses nearest-date matching to align series with different frequencies.
+    Fed assets (WALCL) is weekly, TGA (WTREGEN) is weekly, reverse repo
+    (RRPONTSYD) is daily. Exact date matching fails when publication
+    schedules don't align perfectly.
+
     Returns (current_value, full_series).
     """
     if not fed_assets or not tga or not reverse_repo:
         return None, None
 
-    # Build date-keyed lookups
-    tga_map = {d["date"]: d["value"] for d in tga}
-    rrp_map = {d["date"]: d["value"] for d in reverse_repo}
+    from datetime import date as date_type
+
+    def _parse_date(d: str) -> date_type:
+        return date_type.fromisoformat(d)
+
+    # Pre-sort and pre-parse dates for efficient nearest-date lookup
+    tga_parsed = [(_parse_date(d["date"]), d["value"]) for d in sorted(tga, key=lambda x: x["date"])]
+    rrp_parsed = [(_parse_date(d["date"]), d["value"]) for d in sorted(reverse_repo, key=lambda x: x["date"])]
+
+    def _find_nearest(parsed_series: list[tuple], target_date: date_type, max_gap_days: int = 5) -> Optional[float]:
+        """Find the value in series closest to target_date within max_gap_days."""
+        best_val = None
+        best_gap = max_gap_days + 1
+
+        for point_date, point_val in parsed_series:
+            gap = abs((point_date - target_date).days)
+            if gap < best_gap:
+                best_gap = gap
+                best_val = point_val
+            # Optimization: if series is sorted and we've passed the target, stop early
+            if point_date > target_date and gap > best_gap:
+                break
+
+        return best_val if best_gap <= max_gap_days else None
 
     net_liq_series = []
     for point in fed_assets:
-        date_key = point["date"]
-        tga_val = tga_map.get(date_key)
-        rrp_val = rrp_map.get(date_key)
+        target = _parse_date(point["date"])
+        tga_val = _find_nearest(tga_parsed, target)
+        rrp_val = _find_nearest(rrp_parsed, target)
 
         if tga_val is not None and rrp_val is not None:
-            # All values in millions from FRED — convert to billions
-            fa = point["value"]  # Already in millions
-            net = fa - tga_val - rrp_val
-            net_liq_series.append({"date": date_key, "value": net})
+            net = point["value"] - tga_val - rrp_val
+            net_liq_series.append({"date": point["date"], "value": net})
 
     if not net_liq_series:
-        # Fallback: use latest values even if dates don't align perfectly
+        # Last resort fallback: use most recent value from each series
         fa = fed_assets[-1]["value"]
         tga_v = tga[-1]["value"]
         rrp_v = reverse_repo[-1]["value"]

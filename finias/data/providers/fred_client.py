@@ -13,96 +13,97 @@ logger = logging.getLogger("finias.data.fred")
 # Key FRED series IDs used by the Macro Strategist
 MACRO_SERIES = {
     # Treasury Yields
-    "DGS2": "2-Year Treasury Yield",
-    "DGS5": "5-Year Treasury Yield",
-    "DGS10": "10-Year Treasury Yield",
-    "DGS30": "30-Year Treasury Yield",
-    "DTB3": "3-Month Treasury Bill",
+    "DGS2": "2-Year Treasury Constant Maturity Rate",
+    "DGS5": "5-Year Treasury Constant Maturity Rate",
+    "DGS10": "10-Year Treasury Constant Maturity Rate",
+    "DGS30": "30-Year Treasury Constant Maturity Rate",
+    "DTB3": "3-Month Treasury Bill Secondary Market Rate",
 
     # Spreads
-    "T10Y2Y": "10Y-2Y Spread (Yield Curve)",
-    "T10Y3M": "10Y-3M Spread",
-    "BAMLH0A0HYM2": "ICE BofA US High Yield OAS (Credit Spread)",
+    "T10Y2Y": "10-Year Treasury Minus 2-Year Treasury (Yield Curve Spread)",
+    "T10Y3M": "10-Year Treasury Minus 3-Month Treasury",
+    "BAMLH0A0HYM2": "ICE BofA US High Yield Index Option-Adjusted Spread",
 
     # Rates & Policy
-    "FEDFUNDS": "Federal Funds Rate",
-    "DFEDTARU": "Fed Funds Target Upper",
-    "DFEDTARL": "Fed Funds Target Lower",
+    "FEDFUNDS": "Effective Federal Funds Rate",
+    "DFEDTARU": "Federal Funds Target Rate Upper Limit",
+    "DFEDTARL": "Federal Funds Target Rate Lower Limit",
 
     # Volatility
-    "VIXCLS": "CBOE VIX",
+    "VIXCLS": "CBOE Volatility Index (VIX)",
 
     # Inflation
-    "CPIAUCSL": "CPI All Urban Consumers",
-    "T5YIE": "5-Year Breakeven Inflation",
-    "T10YIE": "10-Year Breakeven Inflation",
+    "CPIAUCSL": "Consumer Price Index for All Urban Consumers: All Items",
+    "T5YIE": "5-Year Breakeven Inflation Rate",
+    "T10YIE": "10-Year Breakeven Inflation Rate",
 
     # Labor
     "UNRATE": "Unemployment Rate",
-    "ICSA": "Initial Jobless Claims",
-    "PAYEMS": "Total Nonfarm Payrolls",
+    "ICSA": "Initial Claims for Unemployment Insurance",
+    "PAYEMS": "All Employees, Total Nonfarm",
 
     # Sentiment / Activity
-    "UMCSENT": "U of Michigan Consumer Sentiment",
+    "UMCSENT": "University of Michigan Consumer Sentiment Index",
     "INDPRO": "Industrial Production Index",
 
     # Dollar
-    "DTWEXBGS": "Trade Weighted US Dollar Index (Broad Goods & Services)",
+    "DTWEXBGS": "Nominal Broad U.S. Dollar Index",
 
-    # === MONETARY POLICY & LIQUIDITY (Phase 1 Expansion) ===
+    # === MONETARY POLICY & LIQUIDITY ===
     "WALCL": "Federal Reserve Total Assets",
-    "TREAST": "Treasury General Account",
-    "WSHOMCB": "Fed Swap Lines with Other Central Banks",
-    "RRPONTSYD": "Reverse Repo Operations (Overnight)",
-    "WTREGEN": "Treasury Repo Operations (Fed)",
-    "WRESBAL": "Fed Reserve Balance (Final)",
-    "TOTBKCR": "Total Banking Credit",
-    "TOTALSL": "Total Federal Reserve Credit",
-    "M2SL": "M2 Money Supply",
-    "NFCI": "National Financial Conditions Index",
-    "ANFCI": "Adjusted NFCI",
-    "STLFSI2": "St. Louis Fed Financial Stress Index",
+    "TREAST": "U.S. Treasury Securities Held by the Federal Reserve",
+    "WSHOMCB": "Mortgage-Backed Securities Held by the Federal Reserve",
+    "RRPONTSYD": "Overnight Reverse Repurchase Agreements (Treasury Securities Sold)",
+    "WTREGEN": "U.S. Treasury General Account (TGA) Balance at Federal Reserve",
+    "WRESBAL": "Reserve Balances with Federal Reserve Banks",
+    "TOTBKCR": "Bank Credit, All Commercial Banks",
+    "TOTALSL": "Total Consumer Credit Owned and Securitized",
+    "M2SL": "M2 Money Stock",
+    "NFCI": "Chicago Fed National Financial Conditions Index",
+    "ANFCI": "Chicago Fed Adjusted National Financial Conditions Index",
+    "STLFSI4": "St. Louis Fed Financial Stress Index",
 
-    # === BUSINESS CYCLE (Phase 1 Expansion) ===
-    "USSLIND": "Leading Economic Index",
-    "TCU": "Total Capacity Utilization",
-    "PERMIT": "New Private Housing Permits",
-    "HOUST": "Total Housing Starts",
-    "RSAFS": "Retail Sales (Advance)",
+    # === BUSINESS CYCLE ===
+    # NOTE: USSLIND (Conference Board LEI) was removed from FRED in 2024.
+    # Business cycle module handles empty LEI data gracefully.
+    "TCU": "Capacity Utilization: Total Industry",
+    "PERMIT": "New Privately-Owned Housing Units Authorized by Building Permits",
+    "HOUST": "New Privately-Owned Housing Units Started",
+    "RSAFS": "Advance Retail Sales: Retail and Food Services",
     "PI": "Personal Income",
-    "PCE": "Personal Consumption Expenditures",
-    "DGORDER": "Durable Goods New Orders",
+    "PCEC96": "Real Personal Consumption Expenditures (Billions of Chained 2017 Dollars)",
+    "DGORDER": "Manufacturers' New Orders: Durable Goods",
     "CFNAI": "Chicago Fed National Activity Index",
-    "GACDISA066MSFRBPHI": "Coincident Economic Activity Index (Philadelphia Fed)",
-    "CCSA": "Consumer Credit (Senior Loan Officer Survey)",
-    "JTSJOL": "Job Openings",
-    "JTSQUR": "Quits Rate",
+    "GACDFSA066MSFRBPHI": "Diffusion Index for Future General Activity (Philadelphia Fed Manufacturing)",
+    "CCSA": "Continued Claims (Insured Unemployment)",
+    "JTSJOL": "Job Openings: Total Nonfarm (JOLTS)",
+    "JTSQUR": "Quits Rate: Total Nonfarm (JOLTS)",
 
-    # === INFLATION (Phase 1 Expansion) ===
-    "CPILFESL": "Core CPI (Less Food & Energy)",
-    "CUSR0000SEHC": "Shelter CPI",
-    "CUSR0000SAS": "Supercore CPI (Shelter + Core Services)",
-    "PCEPI": "PCE Price Index",
-    "PCEPILFE": "Core PCE (Less Food & Energy)",
-    "STICKCPIM157SFRBATL": "Sticky CPI (Atlanta Fed)",
-    "FLEXCPIM157SFRBATL": "Flexible CPI (Atlanta Fed)",
-    "PCETRIM12M159SFRBDAL": "Trimmed Mean PCE (Dallas Fed)",
-    "T5YIFR": "5-Year Forward Inflation Expectation Rate",
-    "PPIACO": "Producer Price Index (All Commodities)",
-    "CES0500000003": "Average Hourly Earnings (All Employees)",
-    "DCOILWTICO": "Crude Oil WTI Spot Price",
+    # === INFLATION ===
+    "CPILFESL": "Consumer Price Index: All Items Less Food and Energy (Core CPI)",
+    "CUSR0000SEHC": "Consumer Price Index: Owners' Equivalent Rent of Residences (Shelter)",
+    "CUSR0000SAS": "Consumer Price Index: Services",
+    "PCEPI": "Personal Consumption Expenditures: Chain-type Price Index",
+    "PCEPILFE": "Personal Consumption Expenditures Excluding Food and Energy (Core PCE)",
+    "STICKCPIM157SFRBATL": "Sticky Price Consumer Price Index (Atlanta Fed)",
+    "FLEXCPIM157SFRBATL": "Flexible Price Consumer Price Index (Atlanta Fed)",
+    "PCETRIM12M159SFRBDAL": "Trimmed Mean PCE Inflation Rate (Dallas Fed)",
+    "T5YIFR": "5-Year, 5-Year Forward Inflation Expectation Rate",
+    "PPIACO": "Producer Price Index: All Commodities",
+    "CES0500000003": "Average Hourly Earnings of All Employees, Total Private",
+    "DCOILWTICO": "Crude Oil Prices: West Texas Intermediate (WTI)",
 
-    # === YIELD CURVE ENHANCEMENTS (Phase 1 Expansion) ===
-    "DFII5": "5-Year Implied Inflation Rate",
-    "DFII10": "10-Year Implied Inflation Rate",
-    "THREEFYTP10": "3-Year Forward 10-Year Inflation Rate",
+    # === YIELD CURVE ENHANCEMENTS ===
+    "DFII5": "5-Year Treasury Inflation-Indexed Security (TIPS Real Yield)",
+    "DFII10": "10-Year Treasury Inflation-Indexed Security (TIPS Real Yield)",
+    "THREEFYTP10": "10-Year Treasury Term Premium (Adrian-Crump-Moench)",
 
-    # === LABOR MARKET (Phase 1 Expansion) ===
-    "U6RATE": "Alternative Unemployment Rate (U-6)",
+    # === LABOR MARKET ===
+    "U6RATE": "Total Unemployed Plus Marginally Attached Plus Part-Time for Economic Reasons (U-6)",
     "CIVPART": "Civilian Labor Force Participation Rate",
-    "LNS11300060": "Employees on Nonfarm Payroll (Private Sector)",
-    "TEMPHELPS": "Temporary Help Services Employment",
-    "AWHAETP": "Average Weekly Hours (Private Sector)",
+    "LNS11300060": "Employment-Population Ratio: 25-54 Years (Prime Age)",
+    "TEMPHELPS": "All Employees: Temporary Help Services",
+    "AWHAETP": "Average Weekly Hours of All Employees, Total Private",
 }
 
 
@@ -141,7 +142,7 @@ class FredClient:
             "series_id": series_id,
             "api_key": self.api_key,
             "file_type": "json",
-            "sort_order": "desc",
+            "sort_order": "asc",
         }
         if observation_start:
             params["observation_start"] = observation_start.isoformat()
@@ -150,7 +151,9 @@ class FredClient:
 
         url = f"{self.BASE_URL}/series/observations"
         async with session.get(url, params=params) as resp:
-            resp.raise_for_status()
+            if resp.status != 200:
+                logger.warning(f"FRED API returned {resp.status} for {series_id}")
+                return []
             data = await resp.json()
 
         observations = []
@@ -167,7 +170,7 @@ class FredClient:
         """Get the most recent observation for a series."""
         observations = await self.get_series(series_id)
         if observations:
-            return observations[0]  # Already sorted desc
+            return observations[-1]  # Sorted ascending, latest is last
         return None
 
     async def get_macro_snapshot(

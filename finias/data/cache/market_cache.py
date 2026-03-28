@@ -7,6 +7,7 @@ from finias.core.database.connection import DatabasePool
 from finias.core.state.redis_state import RedisState
 from finias.data.providers.polygon_client import PolygonClient
 from finias.data.providers.fred_client import FredClient
+from finias.data.cache.matrix_mapping import SERIES_TO_COLUMN
 
 logger = logging.getLogger("finias.data.cache")
 
@@ -113,9 +114,37 @@ class MarketDataCache:
     ) -> list[dict[str, Any]]:
         """
         Get FRED economic data, using cache when possible.
+
+        Staleness logic: if the most recent cached observation is older than
+        the staleness threshold, refresh from FRED. Daily series refresh after
+        2 days stale, weekly/monthly series after 8 days.
         """
         if from_date is None:
             from_date = date.today() - timedelta(days=365)
+
+        # Staleness thresholds by update frequency
+        # Daily series: most market indicators, yields, VIX
+        daily_series = {
+            "DGS2", "DGS5", "DGS10", "DGS30", "DTB3",
+            "T10Y2Y", "T10Y3M", "VIXCLS", "DTWEXBGS",
+            "DFEDTARU", "DFEDTARL", "RRPONTSYD",
+            "T5YIE", "T10YIE", "T5YIFR",
+            "DFII5", "DFII10", "THREEFYTP10",
+            "DCOILWTICO", "BAMLH0A0HYM2",
+        }
+        # Weekly series: Fed balance sheet, claims, financial conditions
+        weekly_series = {
+            "WALCL", "TREAST", "WSHOMCB", "WTREGEN", "WRESBAL",
+            "ICSA", "CCSA", "NFCI", "ANFCI", "TOTBKCR",
+        }
+        # Everything else is monthly or quarterly
+
+        if series_id in daily_series:
+            stale_days = 2
+        elif series_id in weekly_series:
+            stale_days = 10
+        else:
+            stale_days = 40  # Monthly data: ~30 days between releases + buffer
 
         if not force_refresh:
             rows = await self.db.fetch(
@@ -128,7 +157,16 @@ class MarketDataCache:
                 series_id, from_date
             )
             if rows:
-                return [{"date": str(r["obs_date"]), "value": float(r["value"])} for r in rows]
+                # Check staleness: is the most recent observation too old?
+                latest_date = rows[-1]["obs_date"]
+                days_old = (date.today() - latest_date).days
+                if days_old <= stale_days:
+                    return [{"date": str(r["obs_date"]), "value": float(r["value"])} for r in rows]
+                else:
+                    logger.info(
+                        f"Cache stale for {series_id}: latest obs is {days_old} days old "
+                        f"(threshold: {stale_days}). Refreshing."
+                    )
 
         # Fetch from FRED
         logger.info(f"Fetching {series_id} from FRED")
@@ -157,7 +195,7 @@ class MarketDataCache:
 
             await self.state.mark_data_fresh(f"fred:{series_id}")
 
-        # Return from database
+        # Return from database (now refreshed)
         rows = await self.db.fetch(
             """
             SELECT obs_date, value
@@ -168,3 +206,136 @@ class MarketDataCache:
             series_id, from_date
         )
         return [{"date": str(r["obs_date"]), "value": float(r["value"])} for r in rows]
+
+    async def populate_macro_matrix(self) -> int:
+        """
+        Populate the macro_data_matrix table from economic_indicators.
+
+        Pivots row-per-observation data into one-row-per-date matrix format.
+        Also computes net_liquidity (fed_total_assets - tga_balance - reverse_repo).
+
+        Returns number of rows upserted.
+        """
+        # Get all dates that have any data
+        date_rows = await self.db.fetch(
+            "SELECT DISTINCT obs_date FROM economic_indicators ORDER BY obs_date ASC"
+        )
+
+        if not date_rows:
+            return 0
+
+        count = 0
+        async with self.db.acquire() as conn:
+            for date_row in date_rows:
+                obs_date = date_row["obs_date"]
+
+                # Get all series values for this date
+                series_rows = await conn.fetch(
+                    "SELECT series_id, value FROM economic_indicators WHERE obs_date = $1",
+                    obs_date
+                )
+
+                if not series_rows:
+                    continue
+
+                # Build column-value pairs
+                columns = ["obs_date"]
+                values = [obs_date]
+                placeholders = ["$1"]
+                update_parts = []
+                idx = 2
+
+                for row in series_rows:
+                    col_name = SERIES_TO_COLUMN.get(row["series_id"])
+                    if col_name:
+                        columns.append(col_name)
+                        values.append(float(row["value"]))
+                        placeholders.append(f"${idx}")
+                        update_parts.append(f"{col_name} = EXCLUDED.{col_name}")
+                        idx += 1
+
+                if len(columns) <= 1:
+                    continue
+
+                # Upsert
+                sql = f"""
+                    INSERT INTO macro_data_matrix ({', '.join(columns)})
+                    VALUES ({', '.join(placeholders)})
+                    ON CONFLICT (obs_date) DO UPDATE SET
+                        {', '.join(update_parts)},
+                        updated_at = NOW()
+                """
+                await conn.execute(sql, *values)
+                count += 1
+
+            # Compute net_liquidity for all rows that have the components
+            await conn.execute("""
+                UPDATE macro_data_matrix
+                SET net_liquidity = fed_total_assets - COALESCE(tga_balance, 0) - COALESCE(reverse_repo, 0)
+                WHERE fed_total_assets IS NOT NULL
+                  AND (tga_balance IS NOT NULL OR reverse_repo IS NOT NULL)
+            """)
+
+        logger.info(f"Populated macro_data_matrix: {count} dates")
+        return count
+
+    async def get_macro_matrix(
+        self,
+        from_date: date,
+        to_date: date,
+        columns: list[str] | None = None,
+    ) -> list[dict]:
+        """
+        Get macro data from the matrix table.
+
+        Returns list of dicts, one per date, with requested columns.
+        All dates are aligned — no cross-series date mismatches possible.
+
+        Args:
+            from_date: Start date
+            to_date: End date
+            columns: Specific columns to fetch. None = all columns.
+
+        Returns:
+            List of dicts with obs_date + requested column values.
+        """
+        if columns:
+            # Validate column names to prevent SQL injection
+            valid_columns = set(SERIES_TO_COLUMN.values()) | {"net_liquidity", "obs_date"}
+            safe_columns = [c for c in columns if c in valid_columns]
+            col_str = "obs_date, " + ", ".join(safe_columns)
+        else:
+            col_str = "*"
+
+        rows = await self.db.fetch(
+            f"""
+            SELECT {col_str}
+            FROM macro_data_matrix
+            WHERE obs_date BETWEEN $1 AND $2
+            ORDER BY obs_date ASC
+            """,
+            from_date, to_date
+        )
+
+        return [dict(r) for r in rows]
+
+    def extract_series_from_matrix(
+        self,
+        matrix_rows: list[dict],
+        column_name: str,
+    ) -> list[dict]:
+        """
+        Extract a single series from matrix rows in the format computation
+        modules expect: [{"date": str, "value": float}, ...].
+
+        Filters out NULL values (dates where this series has no observation).
+        """
+        series = []
+        for row in matrix_rows:
+            val = row.get(column_name)
+            if val is not None:
+                series.append({
+                    "date": str(row["obs_date"]),
+                    "value": float(val),
+                })
+        return series

@@ -106,7 +106,7 @@ class MacroStrategist(BaseAgent):
             # Monetary Policy
             "FEDFUNDS", "DFEDTARU", "DFEDTARL",
             "WALCL", "TREAST", "WSHOMCB", "RRPONTSYD", "WTREGEN", "WRESBAL",
-            "NFCI", "ANFCI", "STLFSI2",
+            "NFCI", "ANFCI", "STLFSI4",
             "TOTBKCR", "TOTALSL", "M2SL",
             # Volatility
             "VIXCLS",
@@ -120,13 +120,13 @@ class MacroStrategist(BaseAgent):
             "T5YIE", "T10YIE", "T5YIFR",
             "PPIACO", "CES0500000003", "DCOILWTICO",
             # Business Cycle
-            "USSLIND", "UNRATE", "U6RATE", "ICSA", "CCSA",
+            "UNRATE", "U6RATE", "ICSA", "CCSA",
             "JTSJOL", "JTSQUR",
             "TEMPHELPS", "AWHAETP",
             "PERMIT", "HOUST", "RSAFS",
             "UMCSENT", "INDPRO", "TCU", "CFNAI",
             "PI", "DGORDER", "PAYEMS",
-            "GACDISA066MSFRBPHI", "CIVPART", "LNS11300060",
+            "GACDFSA066MSFRBPHI", "CIVPART", "LNS11300060",
         ]
 
         fred_data = {}
@@ -139,6 +139,13 @@ class MacroStrategist(BaseAgent):
             except Exception as e:
                 logger.warning(f"Failed to fetch FRED series {series_id}: {e}")
                 fred_data[series_id] = []
+
+        # Populate the macro matrix from raw economic_indicators
+        try:
+            matrix_count = await self.cache.populate_macro_matrix()
+            logger.info(f"Macro matrix populated: {matrix_count} dates")
+        except Exception as e:
+            logger.warning(f"Failed to populate macro matrix: {e}")
 
         # Fetch market data
         spx_bars = await self.cache.get_daily_bars(
@@ -208,7 +215,7 @@ class MacroStrategist(BaseAgent):
             reverse_repo=fred_data.get("RRPONTSYD", []),
             bank_reserves=fred_data.get("WRESBAL", []),
             nfci_series=fred_data.get("NFCI", []),
-            stress_series=fred_data.get("STLFSI2", []),
+            stress_series=fred_data.get("STLFSI4", []),
             bank_credit=fred_data.get("TOTBKCR", []),
             consumer_credit=fred_data.get("TOTALSL", []),
             m2_series=fred_data.get("M2SL", []),
@@ -216,7 +223,7 @@ class MacroStrategist(BaseAgent):
 
         # 6. Business Cycle (NEW)
         cycle_analysis = analyze_business_cycle(
-            lei_series=fred_data.get("USSLIND", []),
+            lei_series=[],  # Conference Board LEI removed from FRED; module handles gracefully
             unemployment=fred_data.get("UNRATE", []),
             initial_claims=fred_data.get("ICSA", []),
             continuing_claims=fred_data.get("CCSA", []),
@@ -234,7 +241,7 @@ class MacroStrategist(BaseAgent):
             personal_income=fred_data.get("PI", []),
             durable_goods=fred_data.get("DGORDER", []),
             nfp_series=fred_data.get("PAYEMS", []),
-            philly_fed=fred_data.get("GACDISA066MSFRBPHI", []),
+            philly_fed=fred_data.get("GACDFSA066MSFRBPHI", []),
         )
 
         # 7. Inflation (NEW)
@@ -361,9 +368,23 @@ class MacroStrategist(BaseAgent):
         # Parse Claude's response
         text = response.content[0].text
 
-        # Claude returns JSON with summary, key_findings, risks, watch_items
+        # Claude returns JSON with macro_regime, binding_constraint, summary, key_findings, risks, watch_items
         try:
             result = json.loads(text)
+            # Ensure all expected keys exist
+            result.setdefault("summary", "")
+            result.setdefault("key_findings", [])
+            result.setdefault("risks", [])
+            result.setdefault("watch_items", [])
+            result.setdefault("macro_regime", "")
+            result.setdefault("binding_constraint", "")
+
+            # Prepend binding constraint to summary for downstream visibility
+            if result["binding_constraint"] and result["binding_constraint"] not in result["summary"]:
+                result["summary"] = (
+                    f"Binding constraint: {result['binding_constraint']}. "
+                    + result["summary"]
+                )
         except json.JSONDecodeError:
             # Fallback: use the raw text as summary
             result = {
@@ -371,6 +392,8 @@ class MacroStrategist(BaseAgent):
                 "key_findings": [],
                 "risks": [],
                 "watch_items": [],
+                "macro_regime": "",
+                "binding_constraint": "",
             }
 
         return result
