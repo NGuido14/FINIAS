@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS macro_data_matrix (
     cpi_services            NUMERIC(12, 4),    -- CUSR0000SAS
     pce                     NUMERIC(12, 4),    -- PCEPI
     core_pce                NUMERIC(12, 4),    -- PCEPILFE
-    sticky_cpi              NUMERIC(10, 4),    -- STICKCPIM157SFRBATL
-    flexible_cpi            NUMERIC(10, 4),    -- FLEXCPIM157SFRBATL
+    sticky_cpi              NUMERIC(10, 4),    -- STICKCPIM159SFRBATL
+    flexible_cpi            NUMERIC(10, 4),    -- FLEXCPIM159SFRBATL
     trimmed_mean_pce        NUMERIC(10, 4),    -- PCETRIM12M159SFRBDAL
     ppi_all                 NUMERIC(12, 4),    -- PPIACO
     oil_wti                 NUMERIC(10, 4),    -- DCOILWTICO

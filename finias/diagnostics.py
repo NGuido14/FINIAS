@@ -430,7 +430,7 @@ async def check_computations(cache: MarketDataCache):
         info("Testing inflation computation...")
         inf_series = {}
         for sid in ["CPIAUCSL", "CPILFESL", "CUSR0000SEHC", "CUSR0000SAS",
-                    "PCEPI", "PCEPILFE", "STICKCPIM157SFRBATL", "FLEXCPIM157SFRBATL",
+                    "PCEPI", "PCEPILFE", "STICKCPIM159SFRBATL", "FLEXCPIM159SFRBATL",
                     "PCETRIM12M159SFRBDAL", "T5YIE", "T10YIE", "T5YIFR",
                     "PPIACO", "CES0500000003", "DCOILWTICO"]:
             inf_series[sid] = await cache.get_fred_series(sid, from_date=from_date)
@@ -443,8 +443,8 @@ async def check_computations(cache: MarketDataCache):
             cpi_services=inf_series["CUSR0000SAS"],
             pce=inf_series["PCEPI"],
             core_pce=inf_series["PCEPILFE"],
-            sticky_cpi=inf_series["STICKCPIM157SFRBATL"],
-            flexible_cpi=inf_series["FLEXCPIM157SFRBATL"],
+            sticky_cpi=inf_series["STICKCPIM159SFRBATL"],
+            flexible_cpi=inf_series["FLEXCPIM159SFRBATL"],
             trimmed_mean=inf_series["PCETRIM12M159SFRBDAL"],
             breakeven_5y=inf_series["T5YIE"],
             breakeven_10y=inf_series["T10YIE"],

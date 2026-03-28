@@ -289,9 +289,13 @@ def _analyze_risk_appetite(
     spy: list[dict],
 ):
     """
-    IWM/SPY ratio: risk appetite gauge.
+    IWM vs SPY relative return: risk appetite gauge.
     Small caps outperforming = strong risk appetite.
     Large caps outperforming = defensive / flight to quality.
+
+    Uses relative return difference (IWM return minus SPY return)
+    instead of ratio change, because ratio change amplifies small
+    moves when price levels differ significantly.
     """
     min_len = min(len(iwm), len(spy))
     if min_len < 20:
@@ -300,19 +304,22 @@ def _analyze_risk_appetite(
     iwm_closes = np.array([p["close"] for p in iwm[-min_len:]])
     spy_closes = np.array([p["close"] for p in spy[-min_len:]])
 
-    ratio = iwm_closes / spy_closes
-    result.iwm_spy_ratio = float(ratio[-1])
+    # Price ratio (for reference only)
+    result.iwm_spy_ratio = float(iwm_closes[-1] / spy_closes[-1])
 
-    if len(ratio) >= 20:
-        result.iwm_spy_change_20d = float(
-            (ratio[-1] / ratio[-20] - 1) * 100
-        )
+    if len(iwm_closes) >= 20:
+        # Relative return: IWM 20-day return minus SPY 20-day return
+        # This gives the actual performance gap in percentage points
+        iwm_ret_20d = (iwm_closes[-1] / iwm_closes[-20] - 1) * 100
+        spy_ret_20d = (spy_closes[-1] / spy_closes[-20] - 1) * 100
+        result.iwm_spy_change_20d = float(iwm_ret_20d - spy_ret_20d)
 
-        if result.iwm_spy_change_20d > 2.0:
+        # Thresholds based on relative return (smaller than ratio change)
+        if result.iwm_spy_change_20d > 3.0:
             result.risk_appetite = "strong"
         elif result.iwm_spy_change_20d > 0.5:
             result.risk_appetite = "moderate"
-        elif result.iwm_spy_change_20d > -2.0:
+        elif result.iwm_spy_change_20d > -3.0:
             result.risk_appetite = "weak"
         else:
             result.risk_appetite = "risk_averse"
