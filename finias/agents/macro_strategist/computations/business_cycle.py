@@ -76,6 +76,10 @@ class BusinessCycleAnalysis:
     capacity_utilization: Optional[float] = None
     cfnai: Optional[float] = None                   # Chicago Fed National Activity
 
+    # GDP Nowcast
+    gdp_nowcast: Optional[float] = None             # Atlanta Fed GDPNow (annualized %)
+    gdp_nowcast_trend: str = "unknown"              # accelerating, stable, decelerating
+
     # Composite
     composite_leading: float = 0.0                  # -1 to +1
     recession_probability: float = 0.0              # 0 to 1
@@ -133,6 +137,8 @@ class BusinessCycleAnalysis:
                 "indpro_yoy": self.industrial_production_yoy,
                 "capacity_util": self.capacity_utilization,
                 "cfnai": self.cfnai,
+                "gdp_nowcast": self.gdp_nowcast,
+                "gdp_nowcast_trend": self.gdp_nowcast_trend,
             },
             "composite_leading": self.composite_leading,
             "recession_probability": self.recession_probability,
@@ -162,6 +168,7 @@ def analyze_business_cycle(
     durable_goods: list[dict],
     nfp_series: list[dict],
     philly_fed: list[dict],
+    gdp_nowcast_series: list[dict] = None,
 ) -> BusinessCycleAnalysis:
     """Perform complete business cycle analysis."""
 
@@ -175,6 +182,19 @@ def analyze_business_cycle(
         result.lei_6m_change = _cumulative_change(lei_series, 6)
         result.lei_consecutive_negatives = _count_consecutive_negatives_mom(lei_series)
         result.lei_trend = _classify_lei_trend(lei_series)
+
+    # --- GDP Nowcast (Atlanta Fed GDPNow) ---
+    if gdp_nowcast_series and len(gdp_nowcast_series) >= 1:
+        result.gdp_nowcast = gdp_nowcast_series[-1]["value"]
+        if len(gdp_nowcast_series) >= 2:
+            prev = gdp_nowcast_series[-2]["value"]
+            diff = result.gdp_nowcast - prev
+            if diff > 0.3:
+                result.gdp_nowcast_trend = "accelerating"
+            elif diff < -0.3:
+                result.gdp_nowcast_trend = "decelerating"
+            else:
+                result.gdp_nowcast_trend = "stable"
 
     # --- Custom LEI Proxy (replaces Conference Board LEI) ---
     # Build a composite leading indicator from data we have:

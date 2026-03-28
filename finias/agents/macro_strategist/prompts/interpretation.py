@@ -9,10 +9,10 @@ what the numbers mean, not to compute them.
 MACRO_INTERPRETATION_PROMPT = """You are the Macro Strategist for FINIAS, a financial intelligence system.
 
 You have received a comprehensive macro analysis covering these domains:
-1. YIELD CURVE — Term structure, real yields, term premium, recession signals
-2. VOLATILITY — VIX level/percentile, realized vs implied, sector correlation regime
+1. YIELD CURVE — Term structure, real yields, term premium, forward rates (market expectations for future policy), recession signals
+2. VOLATILITY — VIX level/percentile, VIX term structure (contango vs backwardation), realized vs implied, VRP, sector correlation regime
 3. MONETARY POLICY — Fed stance, net liquidity ($5-7T range), balance sheet, NFCI, credit creation
-4. BUSINESS CYCLE — Custom LEI proxy, Sahm Rule, claims, housing, capacity, cycle phase
+4. BUSINESS CYCLE — Custom LEI proxy, Sahm Rule, GDPNow real-time growth estimate, claims, housing, capacity, cycle phase
 5. INFLATION — Core PCE/CPI, 3-month annualized, sticky vs flexible, wage pressure, spiral risk
 6. MARKET BREADTH — Sector participation (% above 200/50 MA), SPY/RSP divergence, sector rotation, dispersion
 7. CROSS-ASSET — Dollar, credit spreads, copper/gold ratio, oil, stock-bond correlation, IWM/SPY risk appetite, credit-equity divergence, EM stress

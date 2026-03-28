@@ -58,6 +58,11 @@ class YieldCurveAnalysis:
     term_premium_10y: Optional[float] = None
     term_premium_trend: Optional[str] = None     # rising, stable, falling
 
+    # Forward rates (market expectations for future rates)
+    forward_1y1y: Optional[float] = None             # Implied 1Y rate, 1 year from now
+    forward_2y3y: Optional[float] = None             # Implied 3Y rate, 2 years from now
+    implied_policy_change_1y: Optional[float] = None  # forward_1y1y minus fed_funds (bp of cuts/hikes priced)
+
     # Enhanced score
     yield_curve_score: float = 0.0               # -1 to +1
 
@@ -92,6 +97,11 @@ class YieldCurveAnalysis:
             "term_premium": {
                 "10y": self.term_premium_10y,
                 "trend": self.term_premium_trend,
+            },
+            "forward_rates": {
+                "1y1y": self.forward_1y1y,
+                "2y3y": self.forward_2y3y,
+                "implied_policy_change_1y_bp": self.implied_policy_change_1y,
             },
             "yield_curve_score": self.yield_curve_score,
         }
@@ -165,6 +175,37 @@ def analyze_yield_curve(
         else:
             tp_trend = "stable"
 
+    # Forward rate expectations
+    fwd_1y1y = None
+    fwd_2y3y = None
+    implied_change = None
+    if t2y is not None and t3m is not None and t3m > 0:
+        # Bootstrap forward 1Y rate, 1Y from now
+        # (1+r2)^2 = (1+r_short) * (1+f)  →  f = (1+r2)^2 / (1+r_short) - 1
+        try:
+            r2 = t2y / 100
+            r_short = t3m / 100
+            fwd_1y1y = (((1 + r2) ** 2 / (1 + r_short)) - 1) * 100
+        except (ZeroDivisionError, ValueError):
+            fwd_1y1y = None
+
+    if t5y is not None and t2y is not None:
+        # Bootstrap forward 3Y rate, 2Y from now
+        # (1+r5)^5 = (1+r2)^2 * (1+f)^3  →  f = ((1+r5)^5 / (1+r2)^2)^(1/3) - 1
+        try:
+            r5 = t5y / 100
+            r2 = t2y / 100
+            fwd_2y3y = ((((1 + r5) ** 5 / (1 + r2) ** 2) ** (1/3)) - 1) * 100
+        except (ZeroDivisionError, ValueError):
+            fwd_2y3y = None
+
+    if fwd_1y1y is not None:
+        ff = _latest(fed_funds) if fed_funds else None
+        if ff is not None:
+            # Positive = market pricing rate ABOVE current (hikes expected)
+            # Negative = market pricing rate BELOW current (cuts expected)
+            implied_change = (fwd_1y1y - ff) * 100  # Convert to basis points
+
     # Enhanced yield curve score
     yc_score = _compute_yield_curve_score(
         spread_2s10s, spread_3m10y, recession_score,
@@ -189,6 +230,9 @@ def analyze_yield_curve(
         real_yield_10y_change_30d=real_10y_30d,
         term_premium_10y=tp_10y,
         term_premium_trend=tp_trend,
+        forward_1y1y=fwd_1y1y,
+        forward_2y3y=fwd_2y3y,
+        implied_policy_change_1y=implied_change,
         yield_curve_score=yc_score,
     )
 

@@ -110,7 +110,7 @@ class MacroStrategist(BaseAgent):
             "NFCI", "ANFCI", "STLFSI4",
             "TOTBKCR", "TOTALSL", "M2SL",
             # Volatility
-            "VIXCLS",
+            "VIXCLS", "VXVCLS",
             # Cross-Asset
             "BAMLH0A0HYM2", "DTWEXBGS",
             # Inflation
@@ -128,6 +128,7 @@ class MacroStrategist(BaseAgent):
             "UMCSENT", "INDPRO", "TCU", "CFNAI",
             "PI", "DGORDER", "PAYEMS",
             "GACDFSA066MSFRBPHI", "CIVPART", "LNS11300060",
+            "GDPNOW",
         ]
 
         fred_data = {}
@@ -194,10 +195,11 @@ class MacroStrategist(BaseAgent):
             term_premium_10y=fred_data.get("THREEFYTP10", []),
         )
 
-        # 2. Volatility (enhanced)
+        # 2. Volatility (enhanced with term structure)
         vol_analysis = analyze_volatility(
             vix_series=fred_data.get("VIXCLS", []),
             spx_prices=spx_prices,
+            vix3m_series=fred_data.get("VXVCLS", []),
         )
         # Add correlation if we have sector data
         if len(sector_prices) >= 5:
@@ -270,6 +272,7 @@ class MacroStrategist(BaseAgent):
             durable_goods=fred_data.get("DGORDER", []),
             nfp_series=fred_data.get("PAYEMS", []),
             philly_fed=fred_data.get("GACDFSA066MSFRBPHI", []),
+            gdp_nowcast_series=fred_data.get("GDPNOW", []),
         )
 
         # 7. Inflation (NEW)

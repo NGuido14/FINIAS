@@ -53,6 +53,11 @@ class VolatilityAnalysis:
     variance_risk_premium: Optional[float] = None   # IV² - RV²
     vrp_regime: str = "unknown"                      # normal, compressed, negative
 
+    # VIX Term Structure
+    vix3m_current: Optional[float] = None            # 3-month implied vol
+    vix_vix3m_ratio: Optional[float] = None          # VIX / VIX3M — >1 = backwardation
+    term_structure_shape: str = "unknown"             # contango, flat, backwardation
+
     # Enhanced score
     vol_score: float = 0.0                           # -1 (bearish high vol) to +1 (bullish low vol)
 
@@ -83,6 +88,11 @@ class VolatilityAnalysis:
                 "variance_risk_premium": self.variance_risk_premium,
                 "vrp_regime": self.vrp_regime,
             },
+            "term_structure": {
+                "vix3m": self.vix3m_current,
+                "vix_vix3m_ratio": self.vix_vix3m_ratio,
+                "shape": self.term_structure_shape,
+            },
             "vol_score": self.vol_score,
         }
 
@@ -90,6 +100,7 @@ class VolatilityAnalysis:
 def analyze_volatility(
     vix_series: list[dict],
     spx_prices: list[dict],
+    vix3m_series: list[dict] = None,
 ) -> VolatilityAnalysis:
     """
     Perform complete volatility analysis.
@@ -140,6 +151,23 @@ def analyze_volatility(
         else:
             vrp_regime = "negative"  # Realized exceeding implied — danger
 
+    # VIX Term Structure: VIX / VIX3M
+    # Contango (ratio < 1): market expects vol to fade — normal
+    # Backwardation (ratio > 1): market expects vol to persist — stressed
+    vix3m = None
+    vix_vix3m_ratio = None
+    term_shape = "unknown"
+    if vix3m_series and len(vix3m_series) > 0:
+        vix3m = vix3m_series[-1]["value"]
+        if vix_current is not None and vix3m > 0:
+            vix_vix3m_ratio = vix_current / vix3m
+            if vix_vix3m_ratio > 1.05:
+                term_shape = "backwardation"
+            elif vix_vix3m_ratio < 0.95:
+                term_shape = "contango"
+            else:
+                term_shape = "flat"
+
     return VolatilityAnalysis(
         vix_current=vix_current,
         vix_percentile_1y=vix_percentile,
@@ -156,6 +184,9 @@ def analyze_volatility(
         vol_risk_score=risk_score,
         variance_risk_premium=vrp,
         vrp_regime=vrp_regime,
+        vix3m_current=vix3m,
+        vix_vix3m_ratio=vix_vix3m_ratio,
+        term_structure_shape=term_shape,
     )
 
 

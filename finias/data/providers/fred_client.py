@@ -31,6 +31,7 @@ MACRO_SERIES = {
 
     # Volatility
     "VIXCLS": "CBOE Volatility Index (VIX)",
+    "VXVCLS": "CBOE S&P 500 3-Month Volatility Index (VIX3M)",
 
     # Inflation
     "CPIAUCSL": "Consumer Price Index for All Urban Consumers: All Items",
@@ -75,6 +76,7 @@ MACRO_SERIES = {
     "DGORDER": "Manufacturers' New Orders: Durable Goods",
     "CFNAI": "Chicago Fed National Activity Index",
     "GACDFSA066MSFRBPHI": "Diffusion Index for Future General Activity (Philadelphia Fed Manufacturing)",
+    "GDPNOW": "Atlanta Fed GDPNow Real GDP Estimate",
     "CCSA": "Continued Claims (Insured Unemployment)",
     "JTSJOL": "Job Openings: Total Nonfarm (JOLTS)",
     "JTSQUR": "Quits Rate: Total Nonfarm (JOLTS)",

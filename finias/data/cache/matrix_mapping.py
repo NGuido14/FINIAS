@@ -25,6 +25,7 @@ SERIES_TO_COLUMN = {
 
     # Volatility
     "VIXCLS": "vix",
+    "VXVCLS": "vix3m",
 
     # Fed Balance Sheet & Liquidity
     "WALCL": "fed_total_assets",

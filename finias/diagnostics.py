@@ -317,6 +317,10 @@ async def check_computations(cache: MarketDataCache):
         )
         ok(f"Yield Curve: 2s10s={yc.spread_2s10s}, shape={yc.curve_shape}, "
            f"recession_score={yc.recession_signal_score:.2f}")
+        if yc.forward_1y1y is not None:
+            ok(f"  Forward 1Y1Y={yc.forward_1y1y:.2f}%, implied policy change={yc.implied_policy_change_1y:.0f}bp")
+        if yc.forward_2y3y is not None:
+            ok(f"  Forward 2Y3Y={yc.forward_2y3y:.2f}%")
     except Exception as e:
         fail(f"Yield Curve: {e}")
 
@@ -324,13 +328,19 @@ async def check_computations(cache: MarketDataCache):
         # Volatility
         info("Testing volatility computation...")
         vix = await cache.get_fred_series("VIXCLS", from_date=from_date)
+        vix3m = await cache.get_fred_series("VXVCLS", from_date=from_date)
         spx_bars = await cache.get_daily_bars("SPY", from_date, to_date)
         spx_prices = [{"date": str(b["trade_date"]), "close": float(b["close"])} for b in spx_bars]
 
         from finias.agents.macro_strategist.computations.volatility import analyze_volatility
-        vol = analyze_volatility(vix_series=vix, spx_prices=spx_prices)
+        vol = analyze_volatility(vix_series=vix, spx_prices=spx_prices, vix3m_series=vix3m)
         ok(f"Volatility: VIX={vol.vix_current}, regime={vol.vol_regime}, "
            f"risk_score={vol.vol_risk_score:.2f}")
+        if vol.vix3m_current is not None:
+            ok(f"  VIX3M={vol.vix3m_current:.2f}, ratio={vol.vix_vix3m_ratio:.3f}, "
+               f"term_structure={vol.term_structure_shape}")
+        if vol.variance_risk_premium is not None:
+            ok(f"  VRP={vol.variance_risk_premium:.2f}, vrp_regime={vol.vrp_regime}")
     except Exception as e:
         fail(f"Volatility: {e}")
 
@@ -392,7 +402,7 @@ async def check_computations(cache: MarketDataCache):
         for sid in ["UNRATE", "ICSA", "CCSA", "JTSJOL", "JTSQUR",
                     "TEMPHELPS", "AWHAETP", "PERMIT", "HOUST", "RSAFS",
                     "UMCSENT", "INDPRO", "TCU", "CFNAI", "PI", "DGORDER",
-                    "PAYEMS", "GACDFSA066MSFRBPHI"]:
+                    "PAYEMS", "GACDFSA066MSFRBPHI", "GDPNOW"]:
             bc_series[sid] = await cache.get_fred_series(sid, from_date=from_date)
 
         from finias.agents.macro_strategist.computations.business_cycle import analyze_business_cycle
@@ -416,10 +426,13 @@ async def check_computations(cache: MarketDataCache):
             durable_goods=bc_series["DGORDER"],
             nfp_series=bc_series["PAYEMS"],
             philly_fed=bc_series["GACDFSA066MSFRBPHI"],
+            gdp_nowcast_series=bc_series.get("GDPNOW", []),
         )
         ok(f"Business Cycle: phase={cycle.cycle_phase}, confidence={cycle.phase_confidence:.2f}, "
            f"sahm={cycle.sahm_value:.3f}, triggered={cycle.sahm_triggered}, "
            f"recession_prob={cycle.recession_probability:.2f}")
+        if cycle.gdp_nowcast is not None:
+            ok(f"  GDPNow={cycle.gdp_nowcast:.1f}% (trend={cycle.gdp_nowcast_trend})")
     except Exception as e:
         fail(f"Business Cycle: {e}")
         import traceback
