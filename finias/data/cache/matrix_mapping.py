@@ -56,6 +56,7 @@ SERIES_TO_COLUMN = {
     "PCETRIM12M159SFRBDAL": "trimmed_mean_pce",
     "PPIACO": "ppi_all",
     "DCOILWTICO": "oil_wti",
+    "DCOILBRENTEU": "oil_brent",
 
     # Breakevens & Real Yields
     "T5YIE": "breakeven_5y",

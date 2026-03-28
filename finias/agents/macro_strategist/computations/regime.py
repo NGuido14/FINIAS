@@ -294,23 +294,17 @@ def _compute_monetary_liquidity_score(
     return max(-1.0, min(1.0, score))
 
 
-def _compute_inflation_category_score(
-    infl: Optional[InflationAnalysis],
-) -> float:
+def _compute_inflation_category_score(infl):
     """
-    Inflation category: -1 (deflation concern) to +1 (overheating).
+    Inflation category contribution to composite.
 
-    For the composite: inflation problems are NEGATIVE for regime
-    (both too high and too low are bad, but in different ways).
-    We convert to a directional score where:
-      Positive = inflation is a headwind (high/rising)
-      Negative = disinflation/deflation (mixed — good for bonds, uncertain for stocks)
-      Zero = stable at target (ideal)
+    The inflation module's score is: positive = overheating, negative = deflation.
+    For the composite regime score: both are bad (both should be bearish).
+    We negate so that overheating inflation DRAGS the composite down.
     """
     if infl is not None:
-        return infl.inflation_score
-
-    return 0.0  # No data = assume neutral
+        return -infl.inflation_score
+    return 0.0
 
 
 def _compute_market_signals_score(

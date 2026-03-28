@@ -174,6 +174,57 @@ def analyze_business_cycle(
         result.lei_consecutive_negatives = _count_consecutive_negatives_mom(lei_series)
         result.lei_trend = _classify_lei_trend(lei_series)
 
+    # --- Custom LEI Proxy (replaces Conference Board LEI) ---
+    # Build a composite leading indicator from data we have:
+    # 1. Initial claims (inverted — falling claims = improving)
+    # 2. Building permits (housing leads GDP by ~4 quarters)
+    # 3. Consumer sentiment expectations
+    # 4. Yield curve spread (2s10s — inverted curve leads recession)
+    # 5. Average weekly hours (hours cut before layoffs)
+    custom_lei_components = []
+
+    if initial_claims and len(initial_claims) >= 12:
+        # Invert: falling claims = positive signal
+        claims_current = np.mean([c["value"] for c in initial_claims[-4:]])
+        claims_past = np.mean([c["value"] for c in initial_claims[-12:-8]])
+        if claims_past > 0:
+            claims_change = -(claims_current / claims_past - 1)  # Inverted
+            custom_lei_components.append(("claims", claims_change, 0.25))
+
+    if building_permits and len(building_permits) >= 6:
+        permits_current = building_permits[-1]["value"]
+        permits_past = building_permits[-6]["value"]
+        if permits_past > 0:
+            permits_change = permits_current / permits_past - 1
+            custom_lei_components.append(("permits", permits_change, 0.20))
+
+    if consumer_sentiment and len(consumer_sentiment) >= 6:
+        sent_current = consumer_sentiment[-1]["value"]
+        sent_past = consumer_sentiment[-6]["value"]
+        if sent_past > 0:
+            sent_change = sent_current / sent_past - 1
+            custom_lei_components.append(("sentiment", sent_change, 0.15))
+
+    if avg_weekly_hours and len(avg_weekly_hours) >= 6:
+        hours_current = avg_weekly_hours[-1]["value"]
+        hours_past = avg_weekly_hours[-6]["value"]
+        if hours_past > 0:
+            hours_change = hours_current / hours_past - 1
+            custom_lei_components.append(("hours", hours_change, 0.15))
+
+    # The yield curve spread contribution comes from the yield curve module
+    # but we can approximate it from the 2s10s spread in fred data if available
+
+    if custom_lei_components:
+        total_weight = sum(w for _, _, w in custom_lei_components)
+        composite_lei = sum(v * w for _, v, w in custom_lei_components) / total_weight
+
+        # Map to LEI-like scale: positive = improving, negative = deteriorating
+        result.lei_level = composite_lei * 100  # Scale to percentage-like
+        result.lei_mom_change = composite_lei * 100  # Approximate
+        result.lei_trend = "improving" if composite_lei > 0.01 else ("deteriorating" if composite_lei < -0.01 else "stable")
+        result.lei_consecutive_negatives = 0 if composite_lei >= 0 else 3  # Approximate
+
     # --- ISM Manufacturing (use Philly Fed as proxy when ISM unavailable) ---
     if philly_fed:
         # Philly Fed diffusion index centered on 0; ISM centered on 50

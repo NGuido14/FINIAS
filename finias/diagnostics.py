@@ -289,6 +289,16 @@ async def check_computations(cache: MarketDataCache):
     infl = None
     spx_prices = []
 
+    # Pre-fetch sector data for breadth and correlation tests
+    sector_etfs_diag = ["XLF", "XLK", "XLE", "XLV", "XLI", "XLP", "XLU", "XLC", "XLY", "XLRE", "XLB"]
+    sector_prices = {}
+    for etf in sector_etfs_diag:
+        try:
+            bars = await cache.get_daily_bars(etf, from_date, to_date)
+            sector_prices[etf] = [{"date": str(b["trade_date"]), "close": float(b["close"])} for b in bars]
+        except:
+            pass
+
     try:
         # Yield Curve
         info("Testing yield curve computation...")
@@ -452,6 +462,76 @@ async def check_computations(cache: MarketDataCache):
         traceback.print_exc()
 
     try:
+        # Breadth
+        info("Testing breadth computation...")
+        rsp_bars = await cache.get_daily_bars("RSP", from_date, to_date)
+        rsp_p = [{"date": str(b["trade_date"]), "close": float(b["close"])} for b in rsp_bars] if rsp_bars else None
+
+        from finias.agents.macro_strategist.computations.breadth import analyze_breadth
+        breadth_test = analyze_breadth(
+            spx_prices=spx_prices,
+            sector_prices=sector_prices,
+            rsp_prices=rsp_p,
+        )
+        ok(f"Breadth: health={breadth_test.breadth_health}, score={breadth_test.breadth_score:.2f}, "
+           f"sectors_above_200ma={breadth_test.sectors_above_200ma}/11, "
+           f"narrow_leadership={breadth_test.narrow_leadership}, "
+           f"rotation={breadth_test.rotation_signal}")
+        if breadth_test.leading_sectors:
+            ok(f"  Leading: {', '.join(breadth_test.leading_sectors)}")
+            ok(f"  Lagging: {', '.join(breadth_test.lagging_sectors)}")
+        if breadth_test.breadth_divergence:
+            warn(f"  DIVERGENCE: {breadth_test.divergence_description}")
+    except Exception as e:
+        fail(f"Breadth: {e}")
+        import traceback
+        traceback.print_exc()
+
+    try:
+        # Cross-Asset (expanded)
+        info("Testing expanded cross-asset computation...")
+        from finias.agents.macro_strategist.computations.cross_asset import analyze_cross_assets
+
+        # Fetch additional symbols
+        add_syms = {}
+        for sym in ["GLD", "CPER", "IWM", "TLT", "HYG", "EEM"]:
+            try:
+                bars = await cache.get_daily_bars(sym, from_date, to_date)
+                add_syms[sym] = [{"date": str(b["trade_date"]), "close": float(b["close"])} for b in bars]
+            except:
+                add_syms[sym] = None
+
+        ca_test = analyze_cross_assets(
+            dxy_series=await cache.get_fred_series("DTWEXBGS", from_date=from_date),
+            hy_spread_series=await cache.get_fred_series("BAMLH0A0HYM2", from_date=from_date),
+            breakeven_5y=await cache.get_fred_series("T5YIE", from_date=from_date),
+            breakeven_10y=await cache.get_fred_series("T10YIE", from_date=from_date),
+            copper_prices=add_syms.get("CPER"),
+            gold_prices=add_syms.get("GLD"),
+            oil_series=await cache.get_fred_series("DCOILWTICO", from_date=from_date),
+            spy_prices=spx_prices,
+            tlt_prices=add_syms.get("TLT"),
+            iwm_prices=add_syms.get("IWM"),
+            hyg_prices=add_syms.get("HYG"),
+            eem_prices=add_syms.get("EEM"),
+        )
+        ok(f"Cross-Asset: score={ca_test.cross_asset_score:.3f}, "
+           f"cu/au_signal={ca_test.copper_gold_signal}, "
+           f"oil_signal={ca_test.oil_signal}, "
+           f"risk_appetite={ca_test.risk_appetite}, "
+           f"stock_bond_corr={ca_test.stock_bond_corr_20d}")
+        if ca_test.risk_parity_stress:
+            warn(f"  RISK PARITY STRESS: stocks and bonds falling together")
+        if ca_test.credit_equity_divergence:
+            warn(f"  CREDIT-EQUITY DIVERGENCE: {ca_test.divergence_type}")
+        if ca_test.em_stress:
+            warn(f"  EM STRESS: relative perf {ca_test.em_relative_performance_20d:.1f}%")
+    except Exception as e:
+        fail(f"Cross-Asset: {e}")
+        import traceback
+        traceback.print_exc()
+
+    try:
         # Full Regime Detection
         info("Testing full regime detection...")
 
@@ -462,13 +542,38 @@ async def check_computations(cache: MarketDataCache):
             from finias.agents.macro_strategist.computations.cross_asset import analyze_cross_assets
             from finias.agents.macro_strategist.computations.regime import detect_regime
 
-            breadth = analyze_breadth(spx_prices=spx_prices)
+            # Fetch RSP for breadth
+            rsp_bars = await cache.get_daily_bars("RSP", from_date, to_date)
+            rsp_prices = [{"date": str(b["trade_date"]), "close": float(b["close"])} for b in rsp_bars] if rsp_bars else None
+
+            breadth = analyze_breadth(
+                spx_prices=spx_prices,
+                sector_prices=sector_prices if 'sector_prices' in dir() else {},
+                rsp_prices=rsp_prices,
+            )
+
+            # Fetch additional symbols for cross-asset
+            diag_syms = {}
+            for sym in ["GLD", "CPER", "IWM", "TLT", "HYG", "EEM"]:
+                try:
+                    bars = await cache.get_daily_bars(sym, from_date, to_date)
+                    diag_syms[sym] = [{"date": str(b["trade_date"]), "close": float(b["close"])} for b in bars]
+                except:
+                    diag_syms[sym] = None
 
             ca = analyze_cross_assets(
                 dxy_series=await cache.get_fred_series("DTWEXBGS", from_date=from_date),
                 hy_spread_series=await cache.get_fred_series("BAMLH0A0HYM2", from_date=from_date),
                 breakeven_5y=await cache.get_fred_series("T5YIE", from_date=from_date),
                 breakeven_10y=await cache.get_fred_series("T10YIE", from_date=from_date),
+                copper_prices=diag_syms.get("CPER"),
+                gold_prices=diag_syms.get("GLD"),
+                oil_series=await cache.get_fred_series("DCOILWTICO", from_date=from_date),
+                spy_prices=spx_prices,
+                tlt_prices=diag_syms.get("TLT"),
+                iwm_prices=diag_syms.get("IWM"),
+                hyg_prices=diag_syms.get("HYG"),
+                eem_prices=diag_syms.get("EEM"),
             )
 
             regime = detect_regime(

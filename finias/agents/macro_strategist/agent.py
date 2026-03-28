@@ -19,6 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 
+import numpy as np
 import anthropic
 
 from finias.core.agents.base import BaseAgent
@@ -163,6 +164,21 @@ class MacroStrategist(BaseAgent):
             except Exception as e:
                 logger.warning(f"Failed to fetch {etf}: {e}")
 
+        # Additional symbols for cross-asset and breadth analysis
+        additional_symbols = {
+            "RSP": None, "IWM": None, "TLT": None, "GLD": None,
+            "HYG": None, "EEM": None, "CPER": None,
+        }
+        for symbol in additional_symbols:
+            try:
+                bars = await self.cache.get_daily_bars(symbol, from_date, to_date)
+                additional_symbols[symbol] = [
+                    {"date": str(b["trade_date"]), "close": float(b["close"])} for b in bars
+                ]
+            except Exception as e:
+                logger.warning(f"Failed to fetch {symbol}: {e}")
+                additional_symbols[symbol] = None
+
         # === Run ALL computation modules ===
 
         # 1. Yield Curve (enhanced)
@@ -192,15 +208,27 @@ class MacroStrategist(BaseAgent):
             vol_analysis.sector_correlation = avg_corr
             vol_analysis.correlation_regime = classify_correlation_regime(avg_corr)
 
-        # 3. Breadth
-        breadth_analysis = analyze_breadth(spx_prices=spx_prices)
+        # 3. Breadth (now uses real ETF data)
+        breadth_analysis = analyze_breadth(
+            spx_prices=spx_prices,
+            sector_prices=sector_prices,
+            rsp_prices=additional_symbols.get("RSP"),
+        )
 
-        # 4. Cross-Asset
+        # 4. Cross-Asset (expanded with intermarket signals)
         ca_analysis = analyze_cross_assets(
             dxy_series=fred_data.get("DTWEXBGS", []),
             hy_spread_series=fred_data.get("BAMLH0A0HYM2", []),
             breakeven_5y=fred_data.get("T5YIE", []),
             breakeven_10y=fred_data.get("T10YIE", []),
+            copper_prices=additional_symbols.get("CPER"),
+            gold_prices=additional_symbols.get("GLD"),
+            oil_series=fred_data.get("DCOILWTICO", []),
+            spy_prices=spx_prices,
+            tlt_prices=additional_symbols.get("TLT"),
+            iwm_prices=additional_symbols.get("IWM"),
+            hyg_prices=additional_symbols.get("HYG"),
+            eem_prices=additional_symbols.get("EEM"),
         )
 
         # 5. Monetary Policy (NEW)
@@ -264,6 +292,43 @@ class MacroStrategist(BaseAgent):
         )
 
         # === Detect regime with full hierarchy ===
+        # Load historical data for dynamic weighting
+        spx_returns_np = None
+        historical_scores = None
+        try:
+            # Get historical regime assessments for dynamic weighting
+            history_rows = await self.cache.db.fetch(
+                """
+                SELECT growth_cycle_score, monetary_liquidity_score,
+                       inflation_score, market_signals_score, assessed_at
+                FROM regime_assessments
+                ORDER BY assessed_at DESC
+                LIMIT 60
+                """
+            )
+
+            if len(history_rows) >= 10:
+                # Reverse to chronological order
+                history_rows = list(reversed(history_rows))
+                historical_scores = {
+                    "growth": [float(r["growth_cycle_score"]) for r in history_rows],
+                    "monetary": [float(r["monetary_liquidity_score"]) for r in history_rows],
+                    "inflation": [float(r["inflation_score"]) for r in history_rows],
+                    "market": [float(r["market_signals_score"]) for r in history_rows],
+                }
+
+                # Compute SPX daily returns for the same period
+                if spx_prices and len(spx_prices) >= len(history_rows):
+                    closes = np.array([p["close"] for p in spx_prices[-(len(history_rows) + 1):]])
+                    spx_returns_np = np.diff(np.log(closes))
+                    # Align lengths
+                    min_len = min(len(spx_returns_np), len(history_rows))
+                    spx_returns_np = spx_returns_np[-min_len:]
+                    for key in historical_scores:
+                        historical_scores[key] = historical_scores[key][-min_len:]
+        except Exception as e:
+            logger.debug(f"Could not load historical scores for dynamic weighting: {e}")
+
         regime_assessment = detect_regime(
             yield_curve=yc_analysis,
             volatility=vol_analysis,
@@ -272,14 +337,22 @@ class MacroStrategist(BaseAgent):
             monetary_policy=mp_analysis,
             business_cycle=cycle_analysis,
             inflation_analysis=infl_analysis,
+            spx_returns=spx_returns_np,
+            historical_category_scores=historical_scores,
         )
 
         # === Claude interpretation ===
         interpretation = await self._interpret(regime_assessment, query.question)
 
-        # === Publish to shared state ===
+        # === Publish to shared state (Redis) ===
         await self.state.set_regime(regime_assessment.to_dict())
         await self.state.publish_opinion(self.name, regime_assessment.to_dict())
+
+        # === Persist to database (PostgreSQL) ===
+        try:
+            await self._persist_opinion(regime_assessment, query, interpretation)
+        except Exception as e:
+            logger.warning(f"Failed to persist opinion to database: {e}")
 
         # === Build opinion ===
         direction = self._regime_to_direction(
@@ -431,3 +504,76 @@ class MacroStrategist(BaseAgent):
             return ConfidenceLevel.LOW
         else:
             return ConfidenceLevel.VERY_LOW
+
+    async def _persist_opinion(self, regime, query: AgentQuery, interpretation: dict):
+        """Store the regime assessment and opinion in PostgreSQL for history."""
+        import uuid
+
+        # Store in regime_assessments
+        key_levels = regime.key_levels
+        await self.cache.db.execute(
+            """
+            INSERT INTO regime_assessments (
+                primary_regime, cycle_phase, liquidity_regime, volatility_regime, inflation_regime,
+                growth_cycle_score, monetary_liquidity_score, inflation_score, market_signals_score,
+                weight_growth, weight_monetary, weight_inflation, weight_market,
+                composite_score, confidence, stress_index, binding_constraint,
+                vix_level, fed_funds_rate, net_liquidity_trillion, spread_2s10s,
+                core_pce_yoy, unemployment_rate, sahm_value, ism_manufacturing,
+                hy_spread, nfci
+            ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9,
+                $10, $11, $12, $13,
+                $14, $15, $16, $17,
+                $18, $19, $20, $21,
+                $22, $23, $24, $25,
+                $26, $27
+            )
+            """,
+            regime.primary_regime.value, regime.cycle_phase,
+            regime.liquidity_regime, regime.volatility_regime, regime.inflation_regime,
+            regime.growth_cycle_score, regime.monetary_liquidity_score,
+            regime.inflation_score, regime.market_signals_score,
+            regime.weight_growth, regime.weight_monetary,
+            regime.weight_inflation, regime.weight_market,
+            regime.composite_score, regime.confidence,
+            regime.stress_index, regime.binding_constraint,
+            key_levels.get("vix"), key_levels.get("fed_funds"),
+            (key_levels.get("net_liquidity") or 0) / 1_000_000, key_levels.get("spread_2s10s"),
+            key_levels.get("core_pce_yoy"), key_levels.get("unemployment"),
+            key_levels.get("sahm_value"), key_levels.get("ism_manufacturing"),
+            key_levels.get("hy_spread"), key_levels.get("nfci"),
+        )
+
+        # Store in agent_opinions
+        opinion_id = str(uuid.uuid4())
+        direction = self._regime_to_direction(regime.primary_regime, regime.composite_score)
+        confidence = self._score_to_confidence(regime.confidence)
+
+        await self.cache.db.execute(
+            """
+            INSERT INTO agent_opinions (
+                opinion_id, agent_name, agent_layer,
+                direction, confidence, regime,
+                summary, key_findings, data_points,
+                methodology, risks_to_view, watch_items,
+                data_freshness, computation_ms,
+                query_question, query_context
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+            )
+            """,
+            opinion_id, self.name, self.layer.value,
+            direction.value, confidence.value, regime.primary_regime.value,
+            interpretation.get("summary", ""),
+            json.dumps(interpretation.get("key_findings", [])),
+            json.dumps(regime.to_dict(), default=str),
+            f"Hierarchical regime model. Binding constraint: {regime.binding_constraint}.",
+            json.dumps(interpretation.get("risks", [])),
+            json.dumps(interpretation.get("watch_items", [])),
+            datetime.now(timezone.utc), 0,
+            query.question, json.dumps(query.context, default=str),
+        )
+
+        logger.info(f"Persisted opinion {opinion_id} and regime assessment to database")

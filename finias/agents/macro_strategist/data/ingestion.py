@@ -18,11 +18,15 @@ logger = logging.getLogger("finias.agent.macro_strategist.ingestion")
 # Symbols needed by the Macro Strategist
 REQUIRED_SYMBOLS = [
     # Index ETFs
-    "SPY", "QQQ", "IWM", "DIA", "TLT", "HYG", "LQD", "GLD", "SLV", "USO",
+    "SPY", "QQQ", "IWM", "DIA",
+    # Bond & Credit
+    "TLT", "SHY", "HYG", "LQD",
+    # Commodities
+    "GLD", "SLV", "USO", "CPER",
     # Sector ETFs
     "XLF", "XLK", "XLE", "XLV", "XLI", "XLP", "XLU", "XLC", "XLY", "XLRE", "XLB",
-    # International & equal-weight
-    "RSP", "EEM", "SHY"
+    # Breadth & International
+    "RSP", "EEM",
 ]
 
 REQUIRED_FRED_SERIES = list(MACRO_SERIES.keys())

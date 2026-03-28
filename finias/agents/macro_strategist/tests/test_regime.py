@@ -51,30 +51,26 @@ def _make_vol(regime="normal", risk_score=0.3):
 
 
 def _make_breadth(score=0.5):
-    return BreadthAnalysis(
-        pct_above_200ma=None,
-        pct_above_50ma=None,
-        breadth_health="data_unavailable",
-        breadth_score=score,
-        breadth_divergence=False,
-        divergence_description=None,
-    )
+    result = BreadthAnalysis()
+    result.breadth_health = "data_unavailable"
+    result.breadth_score = score
+    return result
 
 
 def _make_cross_asset(score=0.0):
-    return CrossAssetAnalysis(
-        dxy_level=104.0,
-        dxy_trend="stable",
-        dxy_change_30d=0.5,
-        hy_spread=3.5,
-        hy_spread_trend="stable",
-        hy_spread_change_30d=-0.1,
-        credit_stress=False,
-        breakeven_5y=2.3,
-        breakeven_10y=2.2,
-        inflation_expectations="anchored",
-        cross_asset_score=score,
-    )
+    result = CrossAssetAnalysis()
+    result.dxy_level = 104.0
+    result.dxy_trend = "stable"
+    result.dxy_change_30d = 0.5
+    result.hy_spread = 3.5
+    result.hy_spread_trend = "stable"
+    result.hy_spread_change_30d = -0.1
+    result.credit_stress = False
+    result.breakeven_5y = 2.3
+    result.breakeven_10y = 2.2
+    result.inflation_expectations = "anchored"
+    result.cross_asset_score = score
+    return result
 
 
 def test_regime_detection_risk_on():

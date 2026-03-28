@@ -92,6 +92,7 @@ MACRO_SERIES = {
     "PPIACO": "Producer Price Index: All Commodities",
     "CES0500000003": "Average Hourly Earnings of All Employees, Total Private",
     "DCOILWTICO": "Crude Oil Prices: West Texas Intermediate (WTI)",
+    "DCOILBRENTEU": "Crude Oil Prices: Brent - Europe (Dollars per Barrel)",
 
     # === YIELD CURVE ENHANCEMENTS ===
     "DFII5": "5-Year Treasury Inflation-Indexed Security (TIPS Real Yield)",

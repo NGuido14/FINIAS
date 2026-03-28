@@ -1,40 +1,78 @@
 """
 Cross-Asset Signal Analysis Module
 
-Monitors relationships between asset classes that institutional desks watch:
-  - US Dollar (DXY) — strong dollar headwind for risk assets
-  - Credit spreads (HY OAS) — credit market's view on default risk
-  - Copper/Gold ratio — growth expectations proxy
-  - Breakeven inflation — market's inflation expectations
+Monitors relationships between asset classes that institutional desks watch.
+Each signal tells a different story about the market's expectations for
+growth, inflation, risk appetite, and systemic stress.
+
+Signals:
+  - Dollar (DXY): Strong dollar = headwind for risk assets and EM
+  - Credit spreads (HY OAS): Credit market's view on default risk
+  - Copper/Gold ratio: Growth expectations proxy (leads equities)
+  - Oil dynamics: Inflation input AND growth indicator
+  - Stock-bond correlation: When both fall, diversification breaks down
+  - Small cap/Large cap ratio: Risk appetite gauge
+  - Credit-equity divergence: Warning when credit and stocks disagree
+
+All computation is pure Python. No API calls. No Claude.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
 
 @dataclass
 class CrossAssetAnalysis:
-    """Cross-asset signal assessment."""
+    """Expanded cross-asset signal assessment."""
+
     # Dollar
-    dxy_level: Optional[float]
-    dxy_trend: Optional[str]          # strengthening, weakening, stable
-    dxy_change_30d: Optional[float]
+    dxy_level: Optional[float] = None
+    dxy_trend: Optional[str] = None           # strengthening, weakening, stable
+    dxy_change_30d: Optional[float] = None
 
     # Credit
-    hy_spread: Optional[float]        # High yield OAS
-    hy_spread_trend: Optional[str]    # tightening, widening, stable
-    hy_spread_change_30d: Optional[float]
-    credit_stress: bool               # True if HY spread > 500bps
+    hy_spread: Optional[float] = None         # High yield OAS
+    hy_spread_trend: Optional[str] = None     # tightening, widening, stable
+    hy_spread_change_30d: Optional[float] = None
+    credit_stress: bool = False               # True if HY spread > 500bps
 
-    # Inflation
-    breakeven_5y: Optional[float]
-    breakeven_10y: Optional[float]
-    inflation_expectations: str       # anchored, rising, falling
+    # Inflation expectations
+    breakeven_5y: Optional[float] = None
+    breakeven_10y: Optional[float] = None
+    inflation_expectations: str = "unknown"   # anchored, rising, falling
+
+    # Copper/Gold ratio (growth proxy)
+    copper_gold_ratio: Optional[float] = None
+    copper_gold_change_20d: Optional[float] = None
+    copper_gold_signal: str = "neutral"       # growth_optimism, growth_pessimism, neutral
+
+    # Oil dynamics
+    oil_price: Optional[float] = None
+    oil_change_20d_pct: Optional[float] = None
+    oil_signal: str = "neutral"               # demand_driven, supply_shock, deflationary, neutral
+
+    # Stock-bond correlation
+    stock_bond_corr_20d: Optional[float] = None
+    stock_bond_corr_60d: Optional[float] = None
+    risk_parity_stress: bool = False          # True when stocks and bonds fall together
+
+    # Small cap / Large cap (risk appetite)
+    iwm_spy_ratio: Optional[float] = None
+    iwm_spy_change_20d: Optional[float] = None
+    risk_appetite: str = "neutral"            # strong, moderate, weak, risk_averse
+
+    # Credit-equity divergence
+    credit_equity_divergence: bool = False
+    divergence_type: Optional[str] = None     # credit_warning, equity_warning
+
+    # EM stress
+    em_relative_performance_20d: Optional[float] = None
+    em_stress: bool = False
 
     # Composite
-    cross_asset_score: float          # -1 to 1 — positive = risk-on, negative = risk-off
+    cross_asset_score: float = 0.0            # -1 to 1 — positive = risk-on
 
     def to_dict(self) -> dict:
         return {
@@ -49,10 +87,38 @@ class CrossAssetAnalysis:
                 "change_30d": self.hy_spread_change_30d,
                 "stress": self.credit_stress,
             },
-            "inflation": {
+            "inflation_expectations": {
                 "breakeven_5y": self.breakeven_5y,
                 "breakeven_10y": self.breakeven_10y,
-                "expectations": self.inflation_expectations,
+                "direction": self.inflation_expectations,
+            },
+            "copper_gold": {
+                "ratio": self.copper_gold_ratio,
+                "change_20d": self.copper_gold_change_20d,
+                "signal": self.copper_gold_signal,
+            },
+            "oil": {
+                "price": self.oil_price,
+                "change_20d_pct": self.oil_change_20d_pct,
+                "signal": self.oil_signal,
+            },
+            "stock_bond_correlation": {
+                "corr_20d": self.stock_bond_corr_20d,
+                "corr_60d": self.stock_bond_corr_60d,
+                "risk_parity_stress": self.risk_parity_stress,
+            },
+            "risk_appetite": {
+                "iwm_spy_ratio": self.iwm_spy_ratio,
+                "iwm_spy_change_20d": self.iwm_spy_change_20d,
+                "appetite": self.risk_appetite,
+            },
+            "credit_equity_divergence": {
+                "divergence": self.credit_equity_divergence,
+                "type": self.divergence_type,
+            },
+            "em": {
+                "relative_perf_20d": self.em_relative_performance_20d,
+                "stress": self.em_stress,
             },
             "cross_asset_score": self.cross_asset_score,
         }
@@ -63,36 +129,242 @@ def analyze_cross_assets(
     hy_spread_series: list[dict],
     breakeven_5y: list[dict],
     breakeven_10y: list[dict],
+    # New parameters
+    copper_prices: list[dict] = None,    # CPER or JJC ETF prices
+    gold_prices: list[dict] = None,      # GLD prices
+    oil_series: list[dict] = None,       # WTI from FRED (DCOILWTICO)
+    spy_prices: list[dict] = None,       # SPY for correlations
+    tlt_prices: list[dict] = None,       # TLT for stock-bond correlation
+    iwm_prices: list[dict] = None,       # IWM for risk appetite
+    hyg_prices: list[dict] = None,       # HYG for credit-equity divergence
+    eem_prices: list[dict] = None,       # EEM for EM stress
 ) -> CrossAssetAnalysis:
-    """Analyze cross-asset signals."""
-    # Dollar
-    dxy = _latest(dxy_series)
-    dxy_trend = _classify_trend(dxy_series, 30)
-    dxy_30d = _change_over_days(dxy_series, 30)
+    """Analyze cross-asset signals with full intermarket analysis."""
 
-    # Credit
-    hy = _latest(hy_spread_series)
-    hy_trend = _classify_trend(hy_spread_series, 30)
-    hy_30d = _change_over_days(hy_spread_series, 30)
-    credit_stress = hy is not None and hy > 5.0  # 500bps
+    result = CrossAssetAnalysis()
 
-    # Inflation expectations
-    be_5y = _latest(breakeven_5y)
-    be_10y = _latest(breakeven_10y)
-    infl_exp = _classify_inflation(breakeven_5y, breakeven_10y)
+    # === Dollar ===
+    result.dxy_level = _latest(dxy_series)
+    result.dxy_trend = _classify_trend_direction(dxy_series, 30)
+    result.dxy_change_30d = _change_over_days(dxy_series, 30)
 
-    # Composite score
-    score = _compute_cross_asset_score(dxy_trend, hy, hy_trend, credit_stress)
+    # === Credit ===
+    result.hy_spread = _latest(hy_spread_series)
+    result.hy_spread_trend = _classify_spread_trend(hy_spread_series, 30)
+    result.hy_spread_change_30d = _change_over_days(hy_spread_series, 30)
+    result.credit_stress = result.hy_spread is not None and result.hy_spread > 5.0
 
-    return CrossAssetAnalysis(
-        dxy_level=dxy, dxy_trend=dxy_trend, dxy_change_30d=dxy_30d,
-        hy_spread=hy, hy_spread_trend=hy_trend,
-        hy_spread_change_30d=hy_30d, credit_stress=credit_stress,
-        breakeven_5y=be_5y, breakeven_10y=be_10y,
-        inflation_expectations=infl_exp,
-        cross_asset_score=score,
-    )
+    # === Inflation Expectations ===
+    result.breakeven_5y = _latest(breakeven_5y)
+    result.breakeven_10y = _latest(breakeven_10y)
+    result.inflation_expectations = _classify_inflation_expectations(breakeven_5y)
 
+    # === Copper/Gold Ratio ===
+    if copper_prices and gold_prices:
+        _analyze_copper_gold(result, copper_prices, gold_prices)
+
+    # === Oil ===
+    if oil_series:
+        _analyze_oil(result, oil_series)
+
+    # === Stock-Bond Correlation ===
+    if spy_prices and tlt_prices:
+        _analyze_stock_bond_correlation(result, spy_prices, tlt_prices)
+
+    # === Small Cap / Large Cap Risk Appetite ===
+    if iwm_prices and spy_prices:
+        _analyze_risk_appetite(result, iwm_prices, spy_prices)
+
+    # === Credit-Equity Divergence ===
+    if hyg_prices and spy_prices:
+        _analyze_credit_equity_divergence(result, hyg_prices, spy_prices)
+
+    # === EM Stress ===
+    if eem_prices and spy_prices:
+        _analyze_em_stress(result, eem_prices, spy_prices)
+
+    # === Composite Score ===
+    result.cross_asset_score = _compute_cross_asset_score(result)
+
+    return result
+
+
+# === Signal Analysis Functions ===
+
+def _analyze_copper_gold(result: CrossAssetAnalysis, copper: list[dict], gold: list[dict]):
+    """
+    Copper/Gold ratio: growth expectations proxy.
+    Copper is growth-sensitive, gold is fear-sensitive.
+    Rising ratio = growth optimism. Falling = growth pessimism.
+    Often leads equity markets by 2-4 weeks.
+    """
+    min_len = min(len(copper), len(gold))
+    if min_len < 20:
+        return
+
+    cu = np.array([p["close"] for p in copper[-min_len:]])
+    au = np.array([p["close"] for p in gold[-min_len:]])
+
+    ratio = cu / au
+    result.copper_gold_ratio = float(ratio[-1])
+
+    if len(ratio) >= 20:
+        result.copper_gold_change_20d = float(
+            (ratio[-1] / ratio[-20] - 1) * 100
+        )
+
+        if result.copper_gold_change_20d > 2.0:
+            result.copper_gold_signal = "growth_optimism"
+        elif result.copper_gold_change_20d < -2.0:
+            result.copper_gold_signal = "growth_pessimism"
+        else:
+            result.copper_gold_signal = "neutral"
+
+
+def _analyze_oil(result: CrossAssetAnalysis, oil: list[dict]):
+    """
+    Oil is simultaneously an inflation input and growth indicator.
+    Rising with strong growth = healthy demand.
+    Rising with weak growth = supply shock (stagflationary).
+    """
+    result.oil_price = _latest(oil)
+
+    if len(oil) >= 20:
+        old = oil[-20]["value"]
+        if old > 0:
+            result.oil_change_20d_pct = (oil[-1]["value"] / old - 1) * 100
+
+            if result.oil_change_20d_pct > 10:
+                result.oil_signal = "supply_shock"  # Agent will cross-ref with growth
+            elif result.oil_change_20d_pct > 3:
+                result.oil_signal = "demand_driven"
+            elif result.oil_change_20d_pct < -10:
+                result.oil_signal = "deflationary"
+            else:
+                result.oil_signal = "neutral"
+
+
+def _analyze_stock_bond_correlation(
+    result: CrossAssetAnalysis,
+    spy: list[dict],
+    tlt: list[dict],
+):
+    """
+    Stock-bond correlation. Normally negative (bonds hedge stocks).
+    When positive (both falling together), risk parity portfolios unwind,
+    creating self-reinforcing selling pressure.
+    """
+    min_len = min(len(spy), len(tlt))
+    if min_len < 61:
+        return
+
+    spy_closes = np.array([p["close"] for p in spy[-min_len:]])
+    tlt_closes = np.array([p["close"] for p in tlt[-min_len:]])
+
+    spy_ret = np.diff(np.log(spy_closes))
+    tlt_ret = np.diff(np.log(tlt_closes))
+
+    if len(spy_ret) >= 20:
+        result.stock_bond_corr_20d = float(
+            np.corrcoef(spy_ret[-20:], tlt_ret[-20:])[0, 1]
+        )
+
+    if len(spy_ret) >= 60:
+        result.stock_bond_corr_60d = float(
+            np.corrcoef(spy_ret[-60:], tlt_ret[-60:])[0, 1]
+        )
+
+    # Risk parity stress: positive correlation with both declining
+    if result.stock_bond_corr_20d is not None and result.stock_bond_corr_20d > 0.3:
+        # Check if both are declining
+        spy_20d_ret = (spy_closes[-1] / spy_closes[-20] - 1) * 100
+        tlt_20d_ret = (tlt_closes[-1] / tlt_closes[-20] - 1) * 100
+        if spy_20d_ret < -2 and tlt_20d_ret < -2:
+            result.risk_parity_stress = True
+
+
+def _analyze_risk_appetite(
+    result: CrossAssetAnalysis,
+    iwm: list[dict],
+    spy: list[dict],
+):
+    """
+    IWM/SPY ratio: risk appetite gauge.
+    Small caps outperforming = strong risk appetite.
+    Large caps outperforming = defensive / flight to quality.
+    """
+    min_len = min(len(iwm), len(spy))
+    if min_len < 20:
+        return
+
+    iwm_closes = np.array([p["close"] for p in iwm[-min_len:]])
+    spy_closes = np.array([p["close"] for p in spy[-min_len:]])
+
+    ratio = iwm_closes / spy_closes
+    result.iwm_spy_ratio = float(ratio[-1])
+
+    if len(ratio) >= 20:
+        result.iwm_spy_change_20d = float(
+            (ratio[-1] / ratio[-20] - 1) * 100
+        )
+
+        if result.iwm_spy_change_20d > 2.0:
+            result.risk_appetite = "strong"
+        elif result.iwm_spy_change_20d > 0.5:
+            result.risk_appetite = "moderate"
+        elif result.iwm_spy_change_20d > -2.0:
+            result.risk_appetite = "weak"
+        else:
+            result.risk_appetite = "risk_averse"
+
+
+def _analyze_credit_equity_divergence(
+    result: CrossAssetAnalysis,
+    hyg: list[dict],
+    spy: list[dict],
+):
+    """
+    Credit-equity divergence. When HYG (credit) and SPY (equity) disagree,
+    one of them is wrong. Historically, credit is more often right.
+    """
+    min_len = min(len(hyg), len(spy))
+    if min_len < 20:
+        return
+
+    hyg_ret = (hyg[-1]["close"] / hyg[-20]["close"] - 1) * 100 if min_len >= 20 else None
+    spy_ret = (spy[-1]["close"] / spy[-20]["close"] - 1) * 100 if min_len >= 20 else None
+
+    if hyg_ret is not None and spy_ret is not None:
+        # Significant divergence: one up >2% and other down >2% over 20 days
+        if spy_ret > 2 and hyg_ret < -1:
+            result.credit_equity_divergence = True
+            result.divergence_type = "credit_warning"  # Credit says risk, equity ignoring
+        elif hyg_ret > 1 and spy_ret < -2:
+            result.credit_equity_divergence = True
+            result.divergence_type = "equity_warning"  # Equity says risk, credit calm
+
+
+def _analyze_em_stress(
+    result: CrossAssetAnalysis,
+    eem: list[dict],
+    spy: list[dict],
+):
+    """EM stress: EEM underperformance + dollar strength = EM pressure."""
+    min_len = min(len(eem), len(spy))
+    if min_len < 20:
+        return
+
+    eem_ret = (eem[-1]["close"] / eem[-20]["close"] - 1) * 100
+    spy_ret = (spy[-1]["close"] / spy[-20]["close"] - 1) * 100
+
+    result.em_relative_performance_20d = eem_ret - spy_ret
+
+    # EM stress: underperforming by >5% over 20 days while dollar strengthening
+    if result.em_relative_performance_20d < -5:
+        result.em_stress = True
+
+
+# === Helper Functions ===
 
 def _latest(series: list[dict]) -> Optional[float]:
     if not series:
@@ -106,71 +378,114 @@ def _change_over_days(series: list[dict], days: int) -> Optional[float]:
     return series[-1]["value"] - series[-(days + 1)]["value"]
 
 
-def _classify_trend(series: list[dict], window: int) -> Optional[str]:
-    """Classify trend direction over a window."""
+def _classify_trend_direction(series: list[dict], window: int) -> Optional[str]:
+    """Classify trend direction."""
     if len(series) < window:
         return None
-
     values = [s["value"] for s in series[-window:]]
-    change_pct = (values[-1] - values[0]) / abs(values[0]) * 100 if values[0] != 0 else 0
-
+    if values[0] == 0:
+        return "stable"
+    change_pct = (values[-1] - values[0]) / abs(values[0]) * 100
     if change_pct > 2:
-        return "strengthening" if "dxy" in str(series) else "widening"
+        return "strengthening"
     elif change_pct < -2:
-        return "weakening" if "dxy" in str(series) else "tightening"
+        return "weakening"
     return "stable"
 
 
-def _classify_inflation(be_5y: list[dict], be_10y: list[dict]) -> str:
-    """Classify inflation expectations trend."""
+def _classify_spread_trend(series: list[dict], window: int) -> Optional[str]:
+    if len(series) < window:
+        return None
+    change = series[-1]["value"] - series[-window]["value"]
+    if change > 0.15:
+        return "widening"
+    elif change < -0.15:
+        return "tightening"
+    return "stable"
+
+
+def _classify_inflation_expectations(be_5y: list[dict]) -> str:
     if not be_5y or len(be_5y) < 20:
         return "unknown"
-
-    recent = [s["value"] for s in be_5y[-5:]]
-    earlier = [s["value"] for s in be_5y[-25:-20]]
-
-    if not earlier:
-        return "unknown"
-
-    avg_recent = np.mean(recent)
-    avg_earlier = np.mean(earlier)
-
-    if avg_recent - avg_earlier > 0.15:
+    recent = np.mean([s["value"] for s in be_5y[-5:]])
+    earlier = np.mean([s["value"] for s in be_5y[-25:-20]]) if len(be_5y) >= 25 else be_5y[0]["value"]
+    if recent - earlier > 0.15:
         return "rising"
-    elif avg_earlier - avg_recent > 0.15:
+    elif earlier - recent > 0.15:
         return "falling"
     return "anchored"
 
 
-def _compute_cross_asset_score(
-    dxy_trend: Optional[str],
-    hy_spread: Optional[float],
-    hy_trend: Optional[str],
-    credit_stress: bool
-) -> float:
+def _compute_cross_asset_score(result: CrossAssetAnalysis) -> float:
     """
     Composite cross-asset score: -1 (risk-off) to +1 (risk-on).
+    Now uses 8 signal sources instead of 2.
     """
     score = 0.0
+    signal_count = 0
 
-    # Weak dollar = risk-on
-    if dxy_trend == "weakening":
-        score += 0.3
-    elif dxy_trend == "strengthening":
-        score -= 0.3
-
-    # Tight credit = risk-on
-    if credit_stress:
-        score -= 0.5
-    elif hy_spread is not None:
-        if hy_spread < 3.0:
-            score += 0.3
-        elif hy_spread < 4.0:
-            score += 0.1
-
-    if hy_trend == "tightening":
+    # Dollar (weight ~15%)
+    if result.dxy_trend == "weakening":
         score += 0.15
-    elif hy_trend == "widening":
+    elif result.dxy_trend == "strengthening":
         score -= 0.15
+    signal_count += 1
+
+    # Credit spreads (weight ~20%)
+    if result.credit_stress:
+        score -= 0.30
+    elif result.hy_spread is not None:
+        if result.hy_spread < 3.0:
+            score += 0.15
+        elif result.hy_spread < 4.0:
+            score += 0.05
+        elif result.hy_spread > 4.5:
+            score -= 0.10
+    if result.hy_spread_trend == "tightening":
+        score += 0.05
+    elif result.hy_spread_trend == "widening":
+        score -= 0.10
+    signal_count += 1
+
+    # Copper/Gold (weight ~15%)
+    if result.copper_gold_signal == "growth_optimism":
+        score += 0.15
+    elif result.copper_gold_signal == "growth_pessimism":
+        score -= 0.15
+    signal_count += 1
+
+    # Oil (weight ~10%)
+    if result.oil_signal == "demand_driven":
+        score += 0.05
+    elif result.oil_signal == "supply_shock":
+        score -= 0.10
+    elif result.oil_signal == "deflationary":
+        score -= 0.05
+    signal_count += 1
+
+    # Stock-bond correlation (weight ~15%)
+    if result.risk_parity_stress:
+        score -= 0.20
+    elif result.stock_bond_corr_20d is not None and result.stock_bond_corr_20d > 0.2:
+        score -= 0.10  # Positive correlation is concerning even without both declining
+    signal_count += 1
+
+    # Risk appetite (weight ~10%)
+    appetite_scores = {"strong": 0.10, "moderate": 0.05, "weak": -0.05, "risk_averse": -0.15}
+    score += appetite_scores.get(result.risk_appetite, 0)
+    signal_count += 1
+
+    # Credit-equity divergence (weight ~10%)
+    if result.credit_equity_divergence:
+        if result.divergence_type == "credit_warning":
+            score -= 0.15  # Credit is usually right
+        elif result.divergence_type == "equity_warning":
+            score -= 0.05
+    signal_count += 1
+
+    # EM stress (weight ~5%)
+    if result.em_stress:
+        score -= 0.10
+    signal_count += 1
 
     return max(-1.0, min(1.0, score))
