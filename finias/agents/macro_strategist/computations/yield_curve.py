@@ -250,11 +250,18 @@ def _classify_shape(
     """
     Classify the yield curve shape.
 
-    - normal: upward sloping (short < long)
-    - flat: minimal spread across maturities
-    - inverted: downward sloping (short > long)
-    - bear_steepening: long rates rising faster (growth/inflation fears)
-    - bull_flattening: short rates rising faster (tightening cycle)
+    Definitions:
+    - normal: upward sloping, spread positive and stable
+    - flat: minimal spread across maturities (±15bp)
+    - inverted: downward sloping (short rates above long)
+    - bear_steepening: spread positive AND widening — long rates rising faster
+      Signals: growth/inflation fears, term premium rising
+    - bull_steepening: spread was negative, becoming less negative — short rates
+      falling faster. Signals: rate cuts expected, un-inversion in progress
+    - bear_flattening: spread positive AND narrowing because short rates rising
+      Signals: tightening expectations
+    - bull_flattening: spread positive AND narrowing because long rates falling
+      Signals: flight to safety, growth concerns
     """
     if t2y is None or t10y is None:
         return "unknown"
@@ -263,14 +270,24 @@ def _classify_shape(
 
     if abs(spread) < 0.15:
         return "flat"
-    elif spread < -0.15:
-        if spread_change_30d is not None and spread_change_30d > 0:
-            return "bear_steepening"  # Was more inverted, now less
+
+    if spread < -0.15:
+        # Curve is inverted
+        if spread_change_30d is not None and spread_change_30d > 0.10:
+            # Becoming less inverted — un-inversion (bull steepening)
+            return "bull_steepening"
         return "inverted"
-    else:
-        if spread_change_30d is not None and spread_change_30d < -0.15:
+
+    # Spread is positive (normal territory)
+    if spread_change_30d is not None:
+        if spread_change_30d > 0.15:
+            # Spread widening with positive spread
+            return "bear_steepening"
+        elif spread_change_30d < -0.15:
+            # Spread narrowing with positive spread
             return "bull_flattening"
-        return "normal"
+
+    return "normal"
 
 
 def _compute_recession_score(

@@ -337,30 +337,46 @@ def _classify_policy_stance(
     """
     Classify monetary policy stance.
 
-    Considers rate level, balance sheet direction, and resulting conditions.
+    Uses a matrix of rate level relative to neutral rate, balance sheet
+    direction, and financial conditions.
+
+    The neutral rate (r*) is estimated at 2.5-3.0%. Rates above this are
+    restrictive regardless of direction. QT (balance sheet shrinking) adds
+    tightening. QE (balance sheet growing significantly) adds accommodation.
+
+    Stance reflects the CURRENT posture, not the direction of change.
+    Direction of change is captured separately in policy_direction.
     """
     if fed_funds is None:
         return "unknown"
 
-    # Rate-based assessment
-    is_high_rates = fed_funds > 4.0
-    is_low_rates = fed_funds < 1.5
-    is_zero = fed_funds < 0.5
+    # Estimate restrictiveness relative to neutral rate (~2.75%)
+    neutral_rate = 2.75
+    rate_gap = fed_funds - neutral_rate  # Positive = above neutral
 
-    # Balance sheet
-    is_qt = qt_pace is not None and qt_pace < -10  # Shrinking by >$10B/month
-    is_qe = qt_pace is not None and qt_pace > 10   # Growing by >$10B/month
+    # Balance sheet stance
+    # qt_pace is monthly change in billions — negative = shrinking, positive = growing
+    is_qt = qt_pace is not None and qt_pace < -5   # Shrinking by >$5B/month
+    is_qe = qt_pace is not None and qt_pace > 50   # Growing by >$50B/month (significant expansion)
 
-    if is_zero and is_qe:
+    # Emergency: zero rates + aggressive QE
+    if fed_funds < 0.5 and is_qe:
         return "emergency"
-    elif is_low_rates or is_qe:
+
+    # Dovish: rates meaningfully below neutral AND not doing QT
+    if rate_gap < -0.75 and not is_qt:
         return "dovish"
-    elif is_high_rates and is_qt:
+
+    # Hawkish: rates well above neutral, OR moderately above neutral with QT
+    if rate_gap > 1.5:
         return "hawkish"
-    elif is_high_rates:
+    if rate_gap > 0.5 and is_qt:
         return "hawkish"
-    else:
-        return "neutral"
+
+    # Neutral: everything else
+    # This includes: rates slightly above neutral with no QT (current situation),
+    # rates near neutral with mixed signals, rates below neutral but with QT running
+    return "neutral"
 
 
 def _classify_policy_direction(fed_target_upper: list[dict]) -> str:

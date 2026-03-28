@@ -123,6 +123,23 @@ def analyze_volatility(
     # Risk score
     risk_score = _compute_vol_risk_score(vix_current, vix_percentile, is_spike, iv_rv)
 
+    # Variance Risk Premium: VIX² - RV²
+    # Positive = normal (selling vol is profitable, implied > realized)
+    # Negative = market underpricing risk (realized exceeding implied)
+    # Near zero = compressed premium, crowded vol-selling trade
+    vrp = None
+    vrp_regime = "unknown"
+    if vix_current is not None and rv_20 is not None:
+        vrp = (vix_current ** 2 - rv_20 ** 2) / 100  # Scale to readable units
+        if vrp > 3.0:
+            vrp_regime = "normal"
+        elif vrp > 0.5:
+            vrp_regime = "compressed"
+        elif vrp > -1.0:
+            vrp_regime = "flat"
+        else:
+            vrp_regime = "negative"  # Realized exceeding implied — danger
+
     return VolatilityAnalysis(
         vix_current=vix_current,
         vix_percentile_1y=vix_percentile,
@@ -137,6 +154,8 @@ def analyze_volatility(
         iv_rv_spread=iv_rv,
         vol_regime=regime,
         vol_risk_score=risk_score,
+        variance_risk_premium=vrp,
+        vrp_regime=vrp_regime,
     )
 
 

@@ -27,6 +27,12 @@ The user's question or context:
 CRITICAL RULES:
 - You are interpreting PRE-COMPUTED data. Do not invent numbers not present in the data.
 - Be SPECIFIC. Reference actual numbers: "VIX at 27.4, 94th percentile" not "VIX is elevated."
+- DISTINGUISH DATA QUALITY: Some indicators are directly measured from market data (VIX, Treasury yields,
+  credit spreads, jobless claims, CPI/PCE indexes), while others are derived proxies.
+  If ism.is_proxy is true, say "manufacturing activity proxy at X (Philly Fed-derived)"
+  NOT "ISM Manufacturing at X". The custom LEI is a composite of claims, permits, sentiment, and hours —
+  refer to it as "custom leading indicator" not "Conference Board LEI."
+  Never present a proxy as if it were the official national indicator.
 - Explain CONNECTIONS between signals: "Copper/gold declining while IWM/SPY weakening confirms growth pessimism"
 - Identify the BINDING CONSTRAINT — the one factor most limiting market performance right now.
 - When signals CONFLICT, say so explicitly and explain which signal is historically more reliable.

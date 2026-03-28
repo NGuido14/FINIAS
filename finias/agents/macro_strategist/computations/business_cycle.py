@@ -41,6 +41,7 @@ class BusinessCycleAnalysis:
     # PMI
     ism_manufacturing: Optional[float] = None
     ism_direction: Optional[str] = None             # rising, stable, falling
+    ism_is_proxy: bool = True                       # True when derived from Philly Fed, not actual ISM
     ism_months_below_50: int = 0
     ism_months_above_50: int = 0
 
@@ -101,6 +102,7 @@ class BusinessCycleAnalysis:
                 "direction": self.ism_direction,
                 "months_below_50": self.ism_months_below_50,
                 "months_above_50": self.ism_months_above_50,
+                "is_proxy": self.ism_is_proxy,
             },
             "sahm_rule": {
                 "value": self.sahm_value,
@@ -183,10 +185,11 @@ def analyze_business_cycle(
     # 5. Average weekly hours (hours cut before layoffs)
     custom_lei_components = []
 
-    if initial_claims and len(initial_claims) >= 12:
+    if initial_claims and len(initial_claims) >= 24:
         # Invert: falling claims = positive signal
+        # Use 6-month lookback (24 weeks) aligned with other components
         claims_current = np.mean([c["value"] for c in initial_claims[-4:]])
-        claims_past = np.mean([c["value"] for c in initial_claims[-12:-8]])
+        claims_past = np.mean([c["value"] for c in initial_claims[-24:-20]])
         if claims_past > 0:
             claims_change = -(claims_current / claims_past - 1)  # Inverted
             custom_lei_components.append(("claims", claims_change, 0.25))
