@@ -88,11 +88,15 @@ class Director(BaseAgent):
         # Get tool definitions from registry
         tools = self.registry.get_tool_definitions()
 
+        # Prepend today's date so Claude uses correct timeframes
+        from datetime import date as _date
+        dated_system_prompt = f"TODAY'S DATE: {_date.today().isoformat()}. All dates and timeframes in your response must be relative to today. Do not reference 2024 or 2025 as future dates.\n\n" + DIRECTOR_SYSTEM_PROMPT
+
         # Initial Claude call
         response = await self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
-            system=DIRECTOR_SYSTEM_PROMPT,
+            system=dated_system_prompt,
             tools=tools if tools else None,
             messages=self._conversation_history,
         )
@@ -150,7 +154,7 @@ class Director(BaseAgent):
             response = await self._client.messages.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
-                system=DIRECTOR_SYSTEM_PROMPT,
+                system=dated_system_prompt,
                 tools=tools if tools else None,
                 messages=self._conversation_history,
             )

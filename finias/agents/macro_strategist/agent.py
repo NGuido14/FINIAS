@@ -432,8 +432,9 @@ class MacroStrategist(BaseAgent):
 
         # Build plain-English notes for fields Claude tends to misinterpret
         data_notes = self._build_data_notes(regime)
+        date_context = f"TODAY'S DATE: {date.today().isoformat()}. All analysis and forward-looking statements should reference dates relative to today.\n\n"
 
-        prompt = data_notes + MACRO_INTERPRETATION_PROMPT.format(
+        prompt = date_context + data_notes + MACRO_INTERPRETATION_PROMPT.format(
             regime_data=regime_data,
             question=question,
         )
