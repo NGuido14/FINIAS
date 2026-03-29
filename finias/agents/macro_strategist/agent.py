@@ -430,7 +430,10 @@ class MacroStrategist(BaseAgent):
 
         regime_data = json.dumps(regime.to_dict(), indent=2, default=str)
 
-        prompt = MACRO_INTERPRETATION_PROMPT.format(
+        # Build plain-English notes for fields Claude tends to misinterpret
+        data_notes = self._build_data_notes(regime)
+
+        prompt = data_notes + MACRO_INTERPRETATION_PROMPT.format(
             regime_data=regime_data,
             question=question,
         )
@@ -473,6 +476,114 @@ class MacroStrategist(BaseAgent):
             }
 
         return result
+
+    def _build_data_notes(self, regime) -> str:
+        """
+        Build plain-English notes for fields that Claude tends to misinterpret.
+
+        These notes are prepended to the interpretation prompt so Claude reads
+        unambiguous descriptions BEFORE encountering the raw JSON numbers.
+        This is more reliable than metadata annotations in to_dict() because
+        Claude processes the notes as natural language context, not as data labels.
+        """
+        notes = []
+        regime_dict = regime.to_dict()
+
+        # --- Cross-Asset: IWM/SPY relative return ---
+        ca = regime_dict.get("components", {}).get("cross_asset", {})
+        ra = ca.get("risk_appetite", {})
+        iwm_val = ra.get("iwm_vs_spy_relative_return_20d_percentage_points")
+        if iwm_val is not None:
+            direction = "outperformed" if iwm_val > 0 else "underperformed"
+            notes.append(
+                f"- IWM vs SPY: IWM {direction} SPY by {abs(iwm_val):.2f} percentage points "
+                f"over the last 20 trading days. The raw value is {iwm_val:.2f}pp. "
+                f"This is NOT {abs(iwm_val * 10):.1f}% — it is {abs(iwm_val):.2f} percentage points."
+            )
+
+        # --- Business Cycle: Custom Leading Indicator ---
+        bc = regime_dict.get("components", {}).get("business_cycle", {})
+        cli = bc.get("custom_leading_indicator", {})
+        cli_val = cli.get("composite_value")
+        cli_trend = cli.get("trend", "unknown")
+        if cli_val is not None:
+            notes.append(
+                f"- Custom Leading Indicator: {cli_val:.2f} (trend: {cli_trend}). "
+                f"This is a CUSTOM composite built from claims, permits, sentiment, and hours. "
+                f"It is NOT the Conference Board LEI. Refer to it as 'custom leading indicator' "
+                f"not 'LEI' or 'leading economic indicator' or 'leading index.'"
+            )
+
+        # --- Business Cycle: ISM Proxy ---
+        mfg = bc.get("manufacturing_activity", {})
+        mfg_val = mfg.get("value")
+        is_proxy = mfg.get("is_proxy_NOT_actual_ISM", True)
+        if mfg_val is not None and is_proxy:
+            notes.append(
+                f"- Manufacturing Activity: {mfg_val:.1f} (Philly Fed-derived PROXY). "
+                f"This is NOT the official ISM Manufacturing PMI. It is derived from the "
+                f"Philadelphia Fed regional survey. Say 'manufacturing activity proxy at {mfg_val:.1f}' "
+                f"not 'ISM Manufacturing at {mfg_val:.1f}.'"
+            )
+
+        # --- Monetary Policy: Net Liquidity ---
+        mp = regime_dict.get("components", {}).get("monetary_policy", {})
+        liq = mp.get("liquidity", {})
+        net_liq_m = liq.get("net_liquidity_millions")
+        net_liq_t = liq.get("net_liquidity_trillions")
+        if net_liq_t is not None:
+            notes.append(
+                f"- Net Liquidity: ${net_liq_t:.3f} trillion (= ${net_liq_m:,.0f} million). "
+                f"Always express in TRILLIONS, not millions."
+            )
+
+        # --- Monetary Policy: Balance Sheet Direction ---
+        bs = mp.get("balance_sheet", {})
+        pace = bs.get("monthly_pace_millions")
+        if pace is not None:
+            if pace > 0:
+                notes.append(
+                    f"- Fed Balance Sheet: GROWING by ~${abs(pace/1000):.1f}B/month. "
+                    f"This is NOT quantitative tightening — the balance sheet is expanding."
+                )
+            elif pace < -5:
+                notes.append(
+                    f"- Fed Balance Sheet: SHRINKING by ~${abs(pace/1000):.1f}B/month (QT active)."
+                )
+
+        # --- Cross-Asset: EM Relative Performance ---
+        em = ca.get("em", {})
+        em_val = em.get("relative_return_vs_spy_20d_percentage_points")
+        if em_val is not None:
+            notes.append(
+                f"- EM vs SPY: EEM {'outperformed' if em_val > 0 else 'underperformed'} SPY by "
+                f"{abs(em_val):.1f} percentage points over 20 days."
+            )
+
+        # --- Breadth: SPY/RSP ---
+        br = regime_dict.get("components", {}).get("breadth", {})
+        spy_rsp = br.get("spy_rsp", {})
+        rsp_change = spy_rsp.get("ratio_change_20d")
+        if rsp_change is not None:
+            if rsp_change > 0.005:
+                notes.append(
+                    f"- SPY/RSP: Cap-weighted slightly outperforming equal-weight over 20 days "
+                    f"(ratio change: {rsp_change:.4f}). Do NOT cite the absolute ratio level."
+                )
+            elif rsp_change < -0.005:
+                notes.append(
+                    f"- SPY/RSP: Equal-weight outperforming cap-weighted over 20 days "
+                    f"(ratio change: {rsp_change:.4f}). Broad breadth improving."
+                )
+
+        if not notes:
+            return ""
+
+        return (
+            "IMPORTANT DATA NOTES — Read these BEFORE interpreting the JSON data:\n"
+            + "\n".join(notes)
+            + "\n\n"
+        )
 
     def _regime_to_direction(self, regime: MarketRegime, score: float) -> SignalDirection:
         """Map regime to a signal direction."""

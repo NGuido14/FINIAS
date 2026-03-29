@@ -62,9 +62,11 @@ class BreadthAnalysis:
     def to_dict(self) -> dict:
         return {
             "spy_rsp": {
-                "ratio": self.spy_rsp_ratio,
-                "change_20d": self.spy_rsp_ratio_change_20d,
-                "change_60d": self.spy_rsp_ratio_change_60d,
+                "price_ratio": self.spy_rsp_ratio,
+                "_price_ratio_note": "SPY price / RSP price. The absolute level (~3.3) is meaningless — only the CHANGE matters. Do not cite the ratio level.",
+                "ratio_change_20d": self.spy_rsp_ratio_change_20d,
+                "ratio_change_60d": self.spy_rsp_ratio_change_60d,
+                "_change_note": "Change in the price ratio. Positive = SPY outperforming RSP (narrow leadership). Negative = RSP outperforming (broad breadth). Typical range: -0.1 to +0.1.",
                 "narrow_leadership": self.narrow_leadership,
             },
             "sector_participation": {

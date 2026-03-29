@@ -86,6 +86,7 @@ class VolatilityAnalysis:
             },
             "vrp": {
                 "variance_risk_premium": self.variance_risk_premium,
+                "_vrp_unit": "VRP = (VIX² - RealizedVol²) / 100. Positive = normal (selling vol profitable). Negative = danger (realized exceeding implied). >3 is healthy, <0 is warning.",
                 "vrp_regime": self.vrp_regime,
             },
             "term_structure": {

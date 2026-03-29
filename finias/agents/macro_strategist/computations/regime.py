@@ -175,7 +175,7 @@ class RegimeAssessment:
         mp_data = self.monetary_policy if isinstance(self.monetary_policy, dict) else {}
         liq_data = mp_data.get("liquidity", {})
         liq_trend = liq_data.get("trend", "unknown")
-        net_liq = liq_data.get("net_liquidity", 0) or 0
+        net_liq = liq_data.get("net_liquidity_millions", 0) or liq_data.get("net_liquidity", 0) or 0
         liquidity_supportive = liq_trend in ("expanding", "stable")
 
         # Volatility

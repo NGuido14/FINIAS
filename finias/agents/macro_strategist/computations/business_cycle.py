@@ -93,20 +93,19 @@ class BusinessCycleAnalysis:
         return {
             "cycle_phase": self.cycle_phase,
             "phase_confidence": self.phase_confidence,
-            "lei": {
-                "level": self.lei_level,
-                "mom_change": self.lei_mom_change,
-                "3m_change": self.lei_3m_change,
-                "6m_change": self.lei_6m_change,
-                "consecutive_negatives": self.lei_consecutive_negatives,
+            "custom_leading_indicator": {
+                "_description": "Custom composite of claims, permits, sentiment, hours. NOT Conference Board LEI. Positive=improving, negative=deteriorating. Typical range: -5 to +5.",
+                "composite_value": self.lei_level,
                 "trend": self.lei_trend,
+                "consecutive_negatives": self.lei_consecutive_negatives,
             },
-            "ism": {
-                "manufacturing": self.ism_manufacturing,
+            "manufacturing_activity": {
+                "value": self.ism_manufacturing,
+                "is_proxy_NOT_actual_ISM": self.ism_is_proxy,
+                "_source": "Derived from Philadelphia Fed Manufacturing Index (regional proxy). Present as 'manufacturing activity proxy' NOT 'ISM Manufacturing'." if self.ism_is_proxy else "Actual ISM Manufacturing PMI.",
                 "direction": self.ism_direction,
                 "months_below_50": self.ism_months_below_50,
                 "months_above_50": self.ism_months_above_50,
-                "is_proxy": self.ism_is_proxy,
             },
             "sahm_rule": {
                 "value": self.sahm_value,

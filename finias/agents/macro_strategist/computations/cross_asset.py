@@ -94,7 +94,8 @@ class CrossAssetAnalysis:
             },
             "copper_gold": {
                 "ratio": self.copper_gold_ratio,
-                "change_20d": self.copper_gold_change_20d,
+                "ratio_change_20d_pct": self.copper_gold_change_20d,
+                "_note": "Percentage change in copper/gold PRICE RATIO over 20 days. Example: +8.6 means the ratio rose 8.6%, indicating growth optimism.",
                 "signal": self.copper_gold_signal,
             },
             "oil": {
@@ -108,8 +109,9 @@ class CrossAssetAnalysis:
                 "risk_parity_stress": self.risk_parity_stress,
             },
             "risk_appetite": {
-                "iwm_spy_ratio": self.iwm_spy_ratio,
-                "iwm_spy_change_20d": self.iwm_spy_change_20d,
+                "iwm_spy_price_ratio": self.iwm_spy_ratio,
+                "iwm_vs_spy_relative_return_20d_percentage_points": self.iwm_spy_change_20d,
+                "_unit": "Relative return in percentage points. Example: -0.25 means IWM returned 0.25 percentage points LESS than SPY. This is NOT -25%.",
                 "appetite": self.risk_appetite,
             },
             "credit_equity_divergence": {
@@ -117,7 +119,8 @@ class CrossAssetAnalysis:
                 "type": self.divergence_type,
             },
             "em": {
-                "relative_perf_20d": self.em_relative_performance_20d,
+                "relative_return_vs_spy_20d_percentage_points": self.em_relative_performance_20d,
+                "_unit": "EEM 20-day return minus SPY 20-day return, in percentage points. Example: -2.6 means EEM returned 2.6 percentage points less than SPY.",
                 "stress": self.em_stress,
             },
             "cross_asset_score": self.cross_asset_score,
