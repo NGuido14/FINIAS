@@ -271,7 +271,7 @@ class MarketDataCache:
             # Compute net_liquidity for all rows that have the components
             await conn.execute("""
                 UPDATE macro_data_matrix
-                SET net_liquidity = fed_total_assets - COALESCE(tga_balance, 0) - COALESCE(reverse_repo, 0)
+                SET net_liquidity = fed_total_assets - COALESCE(tga_balance, 0) - COALESCE(reverse_repo, 0) * 1000
                 WHERE fed_total_assets IS NOT NULL
                   AND (tga_balance IS NOT NULL OR reverse_repo IS NOT NULL)
             """)

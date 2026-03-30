@@ -258,7 +258,7 @@ def _compute_net_liquidity_series(
         rrp_val = _find_nearest(rrp_parsed, target)
 
         if tga_val is not None and rrp_val is not None:
-            net = point["value"] - tga_val - rrp_val
+            net = point["value"] - tga_val - (rrp_val * 1000)  # RRPONTSYD is in billions, convert to millions
             net_liq_series.append({"date": point["date"], "value": net})
 
     if not net_liq_series:
@@ -266,7 +266,7 @@ def _compute_net_liquidity_series(
         fa = fed_assets[-1]["value"]
         tga_v = tga[-1]["value"]
         rrp_v = reverse_repo[-1]["value"]
-        current = fa - tga_v - rrp_v
+        current = fa - tga_v - (rrp_v * 1000)  # RRPONTSYD is in billions, convert to millions
         return current, None
 
     return net_liq_series[-1]["value"], net_liq_series

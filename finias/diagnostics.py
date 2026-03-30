@@ -646,6 +646,23 @@ async def check_computations(cache: MarketDataCache):
             if traj.sector_overweights:
                 ok(f"    Sector OW: {', '.join(traj.sector_overweights)}")
                 ok(f"    Sector UW: {', '.join(traj.sector_underweights)}")
+            # Position sizing and velocity
+            if hasattr(traj, 'max_single_position_pct'):
+                ok(f"    Position: max {traj.max_single_position_pct}% per stock, "
+                   f"beta target {traj.portfolio_beta_target}, cash {traj.cash_target_pct}%"
+                   f"{' [REDUCE EXPOSURE]' if traj.reduce_overall_exposure else ''}")
+            if hasattr(traj, 'vix_velocity'):
+                ok(f"    Velocity: VIX={traj.vix_velocity}, spreads={traj.spread_velocity}, "
+                   f"breadth={traj.breadth_velocity}, urgency={traj.urgency}")
+            if hasattr(traj, 'upcoming_events') and traj.upcoming_events:
+                next_evt = traj.upcoming_events[0]
+                ok(f"    Next event: {next_evt['event']} in {next_evt['days_away']}d "
+                   f"(sizing mult: {traj.pre_event_sizing_multiplier}x)")
+            if hasattr(traj, 'scenario_triggers'):
+                critical = [t for t in traj.scenario_triggers if t.get("severity") == "critical"]
+                for t in critical:
+                    warn(f"    TRIGGER: {t['metric']} at {t['current']}, "
+                         f"threshold {t['threshold']} (distance: {t['distance']})")
     except Exception as e:
         fail(f"Regime Detection: {e}")
         import traceback

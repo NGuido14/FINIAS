@@ -136,17 +136,30 @@ class RegimeAssessment:
         the macro environment. It extracts actionable fields from
         the full regime assessment.
         """
-        # Determine sector guidance from cycle phase and regime
-        favor_cyclicals = (
-            self.cycle_phase in ("early_cycle", "mid_cycle") and
-            self.primary_regime != MarketRegime.RISK_OFF and
-            self.liquidity_regime in ("ample", "adequate")
-        )
-        favor_defensives = (
-            self.cycle_phase in ("late_cycle", "recession") or
-            self.primary_regime in (MarketRegime.RISK_OFF, MarketRegime.CRISIS) or
-            self.stress_index > 0.5
-        )
+        # Determine sector guidance from trajectory data (empirical) with heuristic fallback
+        traj = self.trajectory if isinstance(self.trajectory, dict) else {}
+        traj_sector = traj.get("sector_guidance", {})
+        overweights = traj_sector.get("overweight", [])
+        underweights = traj_sector.get("underweight", [])
+
+        CYCLICAL_ETFS = {"XLF", "XLI", "XLY", "XLK", "XLB", "XLRE"}
+        DEFENSIVE_ETFS = {"XLP", "XLU", "XLV"}
+
+        if overweights:
+            favor_cyclicals = any(s in CYCLICAL_ETFS for s in overweights)
+            favor_defensives = any(s in DEFENSIVE_ETFS for s in overweights)
+        else:
+            # Fallback: heuristic when trajectory data unavailable
+            favor_cyclicals = (
+                self.cycle_phase in ("early_cycle", "mid_cycle") and
+                self.primary_regime != MarketRegime.RISK_OFF and
+                self.liquidity_regime in ("ample", "adequate")
+            )
+            favor_defensives = (
+                self.cycle_phase in ("late_cycle", "recession") or
+                self.primary_regime in (MarketRegime.RISK_OFF, MarketRegime.CRISIS) or
+                self.stress_index > 0.5
+            )
 
         # Rate environment from monetary policy data
         fed_funds = self.key_levels.get("fed_funds", 0)
@@ -219,6 +232,10 @@ class RegimeAssessment:
         traj_surprise = traj.get("inflation_surprise", {})
         traj_sector = traj.get("sector_guidance", {})
         traj_bias = traj.get("forward_bias", {})
+        traj_sizing = traj.get("position_sizing", {})
+        traj_velocity = traj.get("velocity", {})
+        traj_events = traj.get("event_calendar", {})
+        traj_geo = traj.get("geopolitical", {})
 
         return MacroContext(
             regime=self.primary_regime.value,
@@ -262,6 +279,24 @@ class RegimeAssessment:
             sector_overweights=traj_sector.get("overweight", []),
             sector_underweights=traj_sector.get("underweight", []),
             sector_rationale=traj_sector.get("rationale", ""),
+            max_single_position_pct=traj_sizing.get("max_single_position_pct", 5.0),
+            max_sector_exposure_pct=traj_sizing.get("max_sector_exposure_pct", 30.0),
+            portfolio_beta_target=traj_sizing.get("portfolio_beta_target", 1.0),
+            cash_target_pct=traj_sizing.get("cash_target_pct", 5.0),
+            reduce_overall_exposure=traj_sizing.get("reduce_overall_exposure", False),
+            pre_event_sizing_multiplier=traj_events.get("pre_event_sizing_multiplier", 1.0),
+            scenario_triggers=traj.get("scenario_triggers", []),
+            vix_velocity=traj_velocity.get("vix", "unknown"),
+            spread_velocity=traj_velocity.get("credit_spreads", "unknown"),
+            breadth_velocity=traj_velocity.get("breadth", "unknown"),
+            dollar_velocity=traj_velocity.get("dollar", "unknown"),
+            liquidity_velocity=traj_velocity.get("liquidity", "unknown"),
+            urgency=traj_velocity.get("urgency", "normal"),
+            upcoming_events=traj_events.get("upcoming_events", []),
+            nearest_high_impact_days=traj_events.get("nearest_high_impact_days"),
+            active_geopolitical_risks=traj_geo.get("active_risks", []),
+            geopolitical_risk_level=traj_geo.get("risk_level", "unknown"),
+            narrative_regime=traj_geo.get("narrative_regime", "unknown"),
             consistency_warnings=warnings,
         )
 
@@ -333,6 +368,34 @@ class MacroContext:
     sector_underweights: list = field(default_factory=list)
     sector_rationale: str = ""
 
+    # === POSITION SIZING (for Risk Officer / Execution Agent) ===
+    max_single_position_pct: float = 5.0
+    max_sector_exposure_pct: float = 30.0
+    portfolio_beta_target: float = 1.0
+    cash_target_pct: float = 5.0
+    reduce_overall_exposure: bool = False
+    pre_event_sizing_multiplier: float = 1.0
+
+    # === SCENARIO TRIGGERS (for Thesis Monitor) ===
+    scenario_triggers: list = field(default_factory=list)
+
+    # === VELOCITY (for all agents — urgency assessment) ===
+    vix_velocity: str = "unknown"
+    spread_velocity: str = "unknown"
+    breadth_velocity: str = "unknown"
+    dollar_velocity: str = "unknown"
+    liquidity_velocity: str = "unknown"
+    urgency: str = "normal"
+
+    # === EVENT CALENDAR (for Risk Officer / Trade Decision Agent) ===
+    upcoming_events: list = field(default_factory=list)
+    nearest_high_impact_days: Optional[int] = None
+
+    # === GEOPOLITICAL CONTEXT (placeholder — populated by future News agent) ===
+    active_geopolitical_risks: list = field(default_factory=list)
+    geopolitical_risk_level: str = "unknown"
+    narrative_regime: str = "unknown"
+
     # Consistency
     consistency_warnings: list = field(default_factory=list)  # Any internal contradictions detected
 
@@ -392,6 +455,32 @@ class MacroContext:
                 "forward_bias": self.forward_bias,
                 "forward_bias_score": self.forward_bias_score,
                 "forward_bias_confidence": self.forward_bias_confidence,
+            },
+            "position_sizing": {
+                "max_single_position_pct": self.max_single_position_pct,
+                "max_sector_exposure_pct": self.max_sector_exposure_pct,
+                "portfolio_beta_target": self.portfolio_beta_target,
+                "cash_target_pct": self.cash_target_pct,
+                "reduce_overall_exposure": self.reduce_overall_exposure,
+                "pre_event_sizing_multiplier": self.pre_event_sizing_multiplier,
+            },
+            "scenario_triggers": self.scenario_triggers,
+            "velocity": {
+                "vix": self.vix_velocity,
+                "credit_spreads": self.spread_velocity,
+                "breadth": self.breadth_velocity,
+                "dollar": self.dollar_velocity,
+                "liquidity": self.liquidity_velocity,
+                "urgency": self.urgency,
+            },
+            "event_calendar": {
+                "upcoming_events": self.upcoming_events,
+                "nearest_high_impact_days": self.nearest_high_impact_days,
+            },
+            "geopolitical": {
+                "active_risks": self.active_geopolitical_risks,
+                "risk_level": self.geopolitical_risk_level,
+                "narrative_regime": self.narrative_regime,
             },
             "consistency_warnings": self.consistency_warnings,
         }

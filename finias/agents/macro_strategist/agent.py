@@ -373,6 +373,7 @@ class MacroStrategist(BaseAgent):
             prior_regime_assessment=prior_regime,
         )
         regime_assessment.trajectory = trajectory.to_dict()
+        self._last_trajectory = trajectory
 
         # === Claude interpretation ===
         interpretation = await self._interpret(regime_assessment, query.question)
@@ -676,6 +677,59 @@ class MacroStrategist(BaseAgent):
                 f"Based on historical sector returns during similar macro conditions (196 weeks of data)."
             )
 
+        # --- Position Sizing ---
+        sizing = traj.get("position_sizing", {})
+        max_pos = sizing.get("max_single_position_pct")
+        beta = sizing.get("portfolio_beta_target")
+        cash = sizing.get("cash_target_pct")
+        reduce = sizing.get("reduce_overall_exposure", False)
+        if max_pos is not None:
+            notes.append(
+                f"- Position Sizing: Max single position {max_pos}%, max sector {sizing.get('max_sector_exposure_pct')}%, "
+                f"target portfolio beta {beta}, cash target {cash}%. "
+                f"{'REDUCE OVERALL EXPOSURE — conditions warrant defensive positioning.' if reduce else 'Standard exposure limits apply.'}"
+            )
+
+        # --- Event Calendar ---
+        events = traj.get("event_calendar", {})
+        upcoming = events.get("upcoming_events", [])
+        multiplier = events.get("pre_event_sizing_multiplier", 1.0)
+        if upcoming:
+            next_event = upcoming[0]
+            notes.append(
+                f"- Upcoming Event: {next_event['event']} in {next_event['days_away']} days ({next_event['date']}). "
+                f"Pre-event sizing multiplier: {multiplier}x. "
+                f"{'Position sizes reduced due to upcoming high-impact event.' if multiplier < 1.0 else 'No pre-event reduction needed.'}"
+            )
+
+        # --- Velocity ---
+        velocity = traj.get("velocity", {})
+        urgency = velocity.get("urgency", "normal")
+        if urgency != "normal":
+            vel_parts = []
+            if velocity.get("vix") in ("spiking", "rising_fast"):
+                vel_parts.append(f"VIX {velocity['vix']}")
+            if velocity.get("credit_spreads") == "rapid_widening":
+                vel_parts.append("credit spreads rapidly widening")
+            if velocity.get("breadth") == "collapsing":
+                vel_parts.append("breadth collapsing")
+            if velocity.get("liquidity") == "draining":
+                vel_parts.append("liquidity draining")
+            notes.append(
+                f"- URGENCY {urgency.upper()}: {', '.join(vel_parts) if vel_parts else 'multiple indicators deteriorating rapidly'}. "
+                f"Conditions are changing faster than normal — monitor closely."
+            )
+
+        # --- Scenario Triggers ---
+        triggers = traj.get("scenario_triggers", [])
+        critical_triggers = [t for t in triggers if t.get("severity") == "critical" and t.get("distance", 999) < 5]
+        if critical_triggers:
+            for t in critical_triggers:
+                notes.append(
+                    f"- CRITICAL TRIGGER NEARBY: {t['metric']} at {t['current']}, threshold {t['threshold']} "
+                    f"(distance: {t['distance']}). If breached: {t['consequence']}."
+                )
+
         if not notes:
             return ""
 
@@ -686,25 +740,37 @@ class MacroStrategist(BaseAgent):
         )
 
     def _regime_to_direction(self, regime: MarketRegime, score: float) -> SignalDirection:
-        """Map regime to a signal direction."""
-        mapping = {
-            MarketRegime.RISK_ON: SignalDirection.BULLISH,
-            MarketRegime.RISK_OFF: SignalDirection.BEARISH,
-            MarketRegime.TRANSITION: SignalDirection.NEUTRAL,
-            MarketRegime.CRISIS: SignalDirection.STRONGLY_BEARISH,
-            MarketRegime.LOW_VOLATILITY: SignalDirection.SLIGHTLY_BULLISH,
-            MarketRegime.HIGH_VOLATILITY: SignalDirection.SLIGHTLY_BEARISH,
-        }
-        base = mapping.get(regime, SignalDirection.NEUTRAL)
+        """
+        Map regime assessment to a signal direction.
 
-        # Adjust intensity based on composite score
-        if abs(score) > 0.6:
-            if base == SignalDirection.BULLISH:
-                return SignalDirection.STRONGLY_BULLISH
-            elif base == SignalDirection.BEARISH:
-                return SignalDirection.STRONGLY_BEARISH
+        Uses the trajectory layer's forward_bias when available (validated by backtest).
+        Falls back to NEUTRAL when trajectory signals aren't available.
 
-        return base
+        The composite score is NOT used for direction because backtesting proved
+        it has -0.096 correlation with forward returns (anti-predictive).
+        """
+        # Use trajectory forward_bias if available
+        trajectory = getattr(self, '_last_trajectory', None)
+        if trajectory is not None:
+            bias = trajectory.forward_bias
+            confidence = trajectory.forward_bias_confidence
+
+            if bias == "constructive" and confidence == "high":
+                return SignalDirection.BULLISH
+            elif bias == "constructive":
+                return SignalDirection.SLIGHTLY_BULLISH
+            elif bias == "cautious" and confidence == "high":
+                return SignalDirection.BEARISH
+            elif bias == "cautious":
+                return SignalDirection.SLIGHTLY_BEARISH
+            else:
+                return SignalDirection.NEUTRAL
+
+        # Fallback: crisis override only (stress > 0.8 is structurally valid)
+        if regime == MarketRegime.CRISIS:
+            return SignalDirection.STRONGLY_BEARISH
+
+        return SignalDirection.NEUTRAL
 
     def _score_to_confidence(self, score: float) -> ConfidenceLevel:
         """Map a 0-1 confidence score to a ConfidenceLevel enum."""
