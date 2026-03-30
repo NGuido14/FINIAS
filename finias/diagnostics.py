@@ -622,6 +622,30 @@ async def check_computations(cache: MarketDataCache):
                     warn(f"    CONSISTENCY: {w}")
             else:
                 ok(f"    Consistency: ALL CHECKS PASSED")
+
+            # Trajectory assessment
+            from finias.agents.macro_strategist.computations.trajectory import compute_trajectory
+
+            # Get DFEDTARU for rate history
+            dfedtaru = await cache.get_fred_series("DFEDTARU", from_date=from_date)
+
+            traj = compute_trajectory(
+                regime_assessment=regime,
+                fed_target_upper=dfedtaru,
+                prior_regime_assessment=None,  # No prior in diagnostics
+            )
+            ok(f"  TRAJECTORY ASSESSMENT:")
+            ok(f"    Rate history: {traj.policy_trajectory} ({traj.cumulative_rate_change_12m_bp:+.0f}bp in 12m, "
+               f"{len(traj.rate_decisions_12m)} decisions)")
+            ok(f"    Inflation surprise: {traj.inflation_surprise_direction} ({traj.inflation_surprise_pp:+.2f}pp)")
+            ok(f"    Inflation trajectory: {traj.inflation_trajectory}")
+            ok(f"    Stress contrarian: {traj.stress_contrarian_signal}")
+            ok(f"    Binding shift: {traj.binding_shift_direction}")
+            ok(f"    Forward bias: {traj.forward_bias} (score={traj.forward_bias_score:+.3f}, "
+               f"confidence={traj.forward_bias_confidence})")
+            if traj.sector_overweights:
+                ok(f"    Sector OW: {', '.join(traj.sector_overweights)}")
+                ok(f"    Sector UW: {', '.join(traj.sector_underweights)}")
     except Exception as e:
         fail(f"Regime Detection: {e}")
         import traceback

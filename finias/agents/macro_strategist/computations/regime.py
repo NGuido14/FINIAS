@@ -86,6 +86,7 @@ class RegimeAssessment:
 
     assessed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     consistency_warnings: list = field(default_factory=list)
+    trajectory: dict = field(default_factory=dict)    # TrajectoryAssessment.to_dict()
 
     def to_dict(self) -> dict:
         return {
@@ -124,6 +125,7 @@ class RegimeAssessment:
             },
             "assessed_at": self.assessed_at.isoformat(),
             "consistency_warnings": self.consistency_warnings,
+            "trajectory": self.trajectory,
         }
 
     def to_downstream_context(self) -> "MacroContext":
@@ -210,6 +212,14 @@ class RegimeAssessment:
             self.key_levels,
         )
 
+        # Trajectory signals (from regime.trajectory dict)
+        traj = self.trajectory if isinstance(self.trajectory, dict) else {}
+        traj_signals = traj.get("trajectory_signals", {})
+        traj_rate = traj.get("rate_decisions", {})
+        traj_surprise = traj.get("inflation_surprise", {})
+        traj_sector = traj.get("sector_guidance", {})
+        traj_bias = traj.get("forward_bias", {})
+
         return MacroContext(
             regime=self.primary_regime.value,
             cycle_phase=self.cycle_phase,
@@ -238,6 +248,20 @@ class RegimeAssessment:
             fed_funds=fed_funds or 0,
             core_pce_yoy=self.key_levels.get("core_pce_yoy", 0) or 0,
             gdp_nowcast=activity_data.get("gdp_nowcast"),
+            inflation_trajectory=traj_signals.get("inflation_trajectory", "unknown"),
+            inflation_surprise_direction=traj_surprise.get("direction", "neutral"),
+            inflation_surprise_pp=traj_surprise.get("surprise_pp", 0.0),
+            stress_contrarian_signal=traj_signals.get("stress_contrarian", "neutral"),
+            binding_constraint_shifted=traj_signals.get("binding_shifted", False),
+            binding_shift_direction=traj_signals.get("shift_direction", "none"),
+            policy_trajectory=traj_rate.get("policy_trajectory", "unknown"),
+            cumulative_rate_change_12m_bp=traj_rate.get("cumulative_change_bp", 0.0),
+            forward_bias=traj_bias.get("bias", "neutral"),
+            forward_bias_score=traj_bias.get("score", 0.0),
+            forward_bias_confidence=traj_bias.get("confidence", "low"),
+            sector_overweights=traj_sector.get("overweight", []),
+            sector_underweights=traj_sector.get("underweight", []),
+            sector_rationale=traj_sector.get("rationale", ""),
             consistency_warnings=warnings,
         )
 
@@ -293,8 +317,24 @@ class MacroContext:
     core_pce_yoy: float
     gdp_nowcast: Optional[float]        # None if not available
 
+    # === TRAJECTORY SIGNALS (new) ===
+    inflation_trajectory: str = "unknown"               # easing, stable, tightening
+    inflation_surprise_direction: str = "neutral"       # hawkish, neutral, dovish
+    inflation_surprise_pp: float = 0.0                  # actual minus expected
+    stress_contrarian_signal: str = "neutral"            # opportunity, neutral, caution
+    binding_constraint_shifted: bool = False
+    binding_shift_direction: str = "none"
+    policy_trajectory: str = "unknown"                   # cutting, holding, hiking
+    cumulative_rate_change_12m_bp: float = 0.0
+    forward_bias: str = "neutral"                        # constructive, neutral, cautious
+    forward_bias_score: float = 0.0
+    forward_bias_confidence: str = "low"
+    sector_overweights: list = field(default_factory=list)
+    sector_underweights: list = field(default_factory=list)
+    sector_rationale: str = ""
+
     # Consistency
-    consistency_warnings: list          # Any internal contradictions detected
+    consistency_warnings: list = field(default_factory=list)  # Any internal contradictions detected
 
     def to_dict(self) -> dict:
         return {
@@ -308,6 +348,9 @@ class MacroContext:
                 "favor_cyclicals": self.favor_cyclicals,
                 "favor_defensives": self.favor_defensives,
                 "favor_duration": self.favor_duration,
+                "overweight": self.sector_overweights,
+                "underweight": self.sector_underweights,
+                "rationale": self.sector_rationale,
             },
             "rates_and_liquidity": {
                 "rate_environment": self.rate_environment,
@@ -334,6 +377,21 @@ class MacroContext:
                 "fed_funds": self.fed_funds,
                 "core_pce_yoy": self.core_pce_yoy,
                 "gdp_nowcast": self.gdp_nowcast,
+            },
+            "trajectory": {
+                "inflation_trajectory": self.inflation_trajectory,
+                "inflation_surprise": {
+                    "direction": self.inflation_surprise_direction,
+                    "surprise_pp": self.inflation_surprise_pp,
+                },
+                "stress_contrarian": self.stress_contrarian_signal,
+                "binding_shifted": self.binding_constraint_shifted,
+                "binding_shift_direction": self.binding_shift_direction,
+                "policy_trajectory": self.policy_trajectory,
+                "cumulative_rate_change_12m_bp": self.cumulative_rate_change_12m_bp,
+                "forward_bias": self.forward_bias,
+                "forward_bias_score": self.forward_bias_score,
+                "forward_bias_confidence": self.forward_bias_confidence,
             },
             "consistency_warnings": self.consistency_warnings,
         }

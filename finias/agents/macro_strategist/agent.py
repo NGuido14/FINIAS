@@ -40,6 +40,7 @@ from finias.agents.macro_strategist.computations.regime import detect_regime
 from finias.agents.macro_strategist.computations.monetary_policy import analyze_monetary_policy
 from finias.agents.macro_strategist.computations.business_cycle import analyze_business_cycle
 from finias.agents.macro_strategist.computations.inflation import analyze_inflation
+from finias.agents.macro_strategist.computations.trajectory import compute_trajectory
 from finias.agents.macro_strategist.prompts.interpretation import MACRO_INTERPRETATION_PROMPT
 
 logger = logging.getLogger("finias.agent.macro_strategist")
@@ -344,6 +345,35 @@ class MacroStrategist(BaseAgent):
             historical_category_scores=historical_scores,
         )
 
+        # === Compute Trajectory Layer ===
+        # Get prior assessment for trajectory change signals
+        prior_regime = None
+        try:
+            prior_row = await self.cache.db.fetchrow(
+                """
+                SELECT inflation_score, stress_index, binding_constraint
+                FROM regime_assessments
+                ORDER BY id DESC LIMIT 1
+                """
+            )
+            if prior_row:
+                # Create a minimal prior object for comparison
+                class _PriorRegime:
+                    pass
+                prior_regime = _PriorRegime()
+                prior_regime.inflation_score = float(prior_row["inflation_score"]) if prior_row["inflation_score"] else 0.0
+                prior_regime.stress_index = float(prior_row["stress_index"]) if prior_row["stress_index"] else 0.0
+                prior_regime.binding_constraint = prior_row["binding_constraint"] or "none"
+        except Exception as e:
+            logger.warning(f"Could not fetch prior regime for trajectory: {e}")
+
+        trajectory = compute_trajectory(
+            regime_assessment=regime_assessment,
+            fed_target_upper=fred_data.get("DFEDTARU", []),
+            prior_regime_assessment=prior_regime,
+        )
+        regime_assessment.trajectory = trajectory.to_dict()
+
         # === Claude interpretation ===
         interpretation = await self._interpret(regime_assessment, query.question)
 
@@ -576,6 +606,75 @@ class MacroStrategist(BaseAgent):
                     f"- SPY/RSP: Equal-weight outperforming cap-weighted over 20 days "
                     f"(ratio change: {rsp_change:.4f}). Broad breadth improving."
                 )
+
+        # --- Trajectory: Rate Decision History ---
+        traj = regime_dict.get("trajectory", {})
+        rate_info = traj.get("rate_decisions", {})
+        decisions = rate_info.get("decisions_12m", [])
+        cumulative = rate_info.get("cumulative_change_bp", 0)
+        trajectory_str = rate_info.get("policy_trajectory", "unknown")
+        if decisions:
+            last_decision = decisions[-1]
+            notes.append(
+                f"- Fed Rate History: The Fed has made {len(decisions)} rate change(s) over the past 12 months, "
+                f"totaling {cumulative:+.0f}bp. Policy trajectory: {trajectory_str}. "
+                f"Last change: {last_decision['change_bp']:+.0f}bp on {last_decision['date']} "
+                f"(rate after: {last_decision['rate_after']:.2f}%)."
+            )
+        elif trajectory_str == "holding":
+            months = rate_info.get("months_since_last_change", 0)
+            notes.append(
+                f"- Fed Rate History: No rate changes in the past 12 months. "
+                f"The Fed has been on hold for {months:.0f} months."
+            )
+
+        # --- Trajectory: Inflation Surprise ---
+        surprise_info = traj.get("inflation_surprise", {})
+        surprise_pp = surprise_info.get("surprise_pp", 0)
+        surprise_dir = surprise_info.get("direction", "neutral")
+        if abs(surprise_pp) > 0.1:
+            notes.append(
+                f"- Inflation Surprise: Core PCE exceeds 5Y breakeven by {surprise_pp:+.2f}pp — "
+                f"{surprise_dir} surprise. {'Market underpricing inflation persistence.' if surprise_dir == 'hawkish' else 'Inflation coming in below expectations.'}"
+            )
+
+        # --- Trajectory: Forward Bias ---
+        bias_info = traj.get("forward_bias", {})
+        bias = bias_info.get("bias", "neutral")
+        confidence = bias_info.get("confidence", "low")
+        signals = traj.get("trajectory_signals", {})
+        infl_traj = signals.get("inflation_trajectory", "unknown")
+        stress_sig = signals.get("stress_contrarian", "neutral")
+        shifted = signals.get("binding_shifted", False)
+        shift_dir = signals.get("shift_direction", "none")
+
+        if bias != "neutral" or infl_traj != "unknown":
+            parts = []
+            if infl_traj != "unknown":
+                parts.append(f"inflation {infl_traj}")
+            if stress_sig != "neutral":
+                parts.append(f"stress {stress_sig}")
+            if shifted:
+                parts.append(f"binding constraint shifted {shift_dir}")
+            notes.append(
+                f"- Forward Macro Bias: {bias} ({confidence} confidence). "
+                f"Signals: {', '.join(parts) if parts else 'none active'}."
+            )
+
+        # --- Trajectory: Sector Guidance ---
+        sector_info = traj.get("sector_guidance", {})
+        overweights = sector_info.get("overweight", [])
+        underweights = sector_info.get("underweight", [])
+        rationale = sector_info.get("rationale", "")
+        if overweights:
+            from finias.agents.macro_strategist.computations.trajectory import SECTOR_NAMES
+            ow_names = [SECTOR_NAMES.get(s, s) for s in overweights]
+            uw_names = [SECTOR_NAMES.get(s, s) for s in underweights]
+            notes.append(
+                f"- Empirical Sector Guidance: Overweight {', '.join(ow_names)}. "
+                f"Underweight {', '.join(uw_names)}. "
+                f"Based on historical sector returns during similar macro conditions (196 weeks of data)."
+            )
 
         if not notes:
             return ""
