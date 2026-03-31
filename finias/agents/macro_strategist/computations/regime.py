@@ -967,6 +967,7 @@ def _extract_key_levels(
     if infl:
         levels["core_pce_yoy"] = infl.core_pce_yoy
         levels["core_cpi_3m_ann"] = infl.core_cpi_3m_annualized
+        levels["core_pce_3m_ann"] = infl.core_pce_3m_annualized
         levels["breakeven_5y"] = infl.breakeven_5y
 
     return levels

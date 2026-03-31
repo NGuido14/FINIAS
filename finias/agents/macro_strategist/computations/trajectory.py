@@ -596,7 +596,7 @@ def compute_scenario_triggers(
     triggers = []
 
     # --- Inflation triggers ---
-    core_pce_3m = kl.get("core_cpi_3m_ann")  # 3m annualized
+    core_pce_3m = kl.get("core_pce_3m_ann")  # Fed's preferred measure: core PCE 3m annualized
     if core_pce_3m is not None:
         triggers.append({
             "id": "inflation_acceleration",
