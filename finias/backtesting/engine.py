@@ -12,6 +12,7 @@ data windowing, and result storage.
 from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any, Callable, Awaitable
+import json
 import uuid
 import logging
 
@@ -82,10 +83,10 @@ async def run_walk_forward(
                     primary_regime, cycle_phase, stress_index,
                     confidence, binding_constraint,
                     spx_fwd_5d, spx_fwd_20d, spx_fwd_60d, spx_max_dd_20d,
-                    modules_used, warmup
+                    modules_used, warmup, trajectory_json
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $18
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19
                 )
                 ON CONFLICT (backtest_run_id, sim_date) DO UPDATE SET
                     composite_score = EXCLUDED.composite_score,
@@ -101,7 +102,8 @@ async def run_walk_forward(
                     spx_fwd_5d = EXCLUDED.spx_fwd_5d,
                     spx_fwd_20d = EXCLUDED.spx_fwd_20d,
                     spx_fwd_60d = EXCLUDED.spx_fwd_60d,
-                    spx_max_dd_20d = EXCLUDED.spx_max_dd_20d
+                    spx_max_dd_20d = EXCLUDED.spx_max_dd_20d,
+                    trajectory_json = EXCLUDED.trajectory_json
                 """,
                 run_id, current,
                 scores.get("composite_score"),
@@ -120,6 +122,7 @@ async def run_walk_forward(
                 fwd_returns.get("max_dd_20d"),
                 scores.get("modules_used", "full"),
                 is_warmup,
+                json.dumps(scores.get("trajectory_json")) if scores.get("trajectory_json") else None,
             )
 
             total_steps += 1

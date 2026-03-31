@@ -46,6 +46,7 @@ from finias.agents.macro_strategist.computations.inflation import analyze_inflat
 from finias.agents.macro_strategist.computations.breadth import analyze_breadth
 from finias.agents.macro_strategist.computations.cross_asset import analyze_cross_assets
 from finias.agents.macro_strategist.computations.regime import detect_regime
+from finias.agents.macro_strategist.computations.trajectory import compute_trajectory
 
 logger = logging.getLogger("finias.backtesting.macro_runner")
 
@@ -81,6 +82,13 @@ async def main():
     polygon = PolygonClient()
 
     try:
+        # Clean up old backtest results (pre-Sahm-fix, pre-trajectory)
+        old_count = await db.fetchval("SELECT COUNT(*) FROM backtest_results")
+        if old_count > 0:
+            print(f"  Cleaning up {old_count} old backtest results (pre-Sahm-fix)...")
+            await db.execute("DELETE FROM backtest_results")
+            print(f"  Deleted. Starting fresh.\n")
+
         # Step 1: Ensure historical data
         print("Step 1: Ensuring historical data (5yr Polygon, 10yr FRED)...")
         print("  This may take several minutes on first run.\n")
@@ -126,6 +134,9 @@ async def main():
         print(f"  Loaded {len(all_fred)} FRED series, {len(all_polygon)} Polygon symbols\n")
 
         # Step 3: Define the runner function
+        # Track prior regime for trajectory signal computation
+        _prior_regime_state = {"regime": None}
+
         async def compute_regime_for_date(sim_date: date) -> dict:
             """Run the full macro computation pipeline for a given date."""
 
@@ -271,6 +282,59 @@ async def main():
                     inflation_analysis=infl,
                 )
 
+                # === Trajectory Computation ===
+                # Build a minimal prior regime object for trajectory comparison
+                prior_regime = None
+                if _prior_regime_state["regime"] is not None:
+                    pr = _prior_regime_state["regime"]
+                    class _PriorRegime:
+                        pass
+                    prior_regime = _PriorRegime()
+                    prior_regime.inflation_score = pr.get("inflation_score", 0.0)
+                    prior_regime.stress_index = pr.get("stress_index", 0.0)
+                    prior_regime.binding_constraint = pr.get("binding_constraint", "none")
+
+                trajectory = compute_trajectory(
+                    regime_assessment=regime,
+                    fed_target_upper=fred_as_of.get("DFEDTARU", []),
+                    prior_regime_assessment=prior_regime,
+                )
+
+                # Store current regime state for next step's prior
+                _prior_regime_state["regime"] = {
+                    "inflation_score": regime.inflation_score,
+                    "stress_index": regime.stress_index,
+                    "binding_constraint": regime.binding_constraint,
+                }
+
+                # Build trajectory dict for storage
+                trajectory_data = {
+                    "forward_bias": trajectory.forward_bias,
+                    "forward_bias_score": trajectory.forward_bias_score,
+                    "forward_bias_confidence": trajectory.forward_bias_confidence,
+                    "inflation_trajectory": trajectory.inflation_trajectory,
+                    "inflation_score_4w_change": trajectory.inflation_score_4w_change,
+                    "stress_contrarian": trajectory.stress_contrarian_signal,
+                    "stress_4w_change": trajectory.stress_4w_change,
+                    "binding_shifted": trajectory.binding_constraint_shifted,
+                    "binding_shift_direction": trajectory.binding_shift_direction,
+                    "prior_binding": trajectory.prior_binding_constraint,
+                    "policy_trajectory": trajectory.policy_trajectory,
+                    "cumulative_rate_change_bp": trajectory.cumulative_rate_change_12m_bp,
+                    "inflation_surprise_pp": trajectory.inflation_surprise_pp,
+                    "inflation_surprise_direction": trajectory.inflation_surprise_direction,
+                    "max_single_position_pct": trajectory.max_single_position_pct,
+                    "portfolio_beta_target": trajectory.portfolio_beta_target,
+                    "cash_target_pct": trajectory.cash_target_pct,
+                    "reduce_overall_exposure": trajectory.reduce_overall_exposure,
+                    "vix_velocity": trajectory.vix_velocity,
+                    "spread_velocity": trajectory.spread_velocity,
+                    "breadth_velocity": trajectory.breadth_velocity,
+                    "urgency": trajectory.urgency,
+                    "sector_overweights": trajectory.sector_overweights,
+                    "sector_underweights": trajectory.sector_underweights,
+                }
+
                 return {
                     "composite_score": regime.composite_score,
                     "growth_score": regime.growth_cycle_score,
@@ -283,6 +347,7 @@ async def main():
                     "confidence": regime.confidence,
                     "binding_constraint": regime.binding_constraint,
                     "modules_used": "full",
+                    "trajectory_json": trajectory_data,
                 }
 
             except Exception as e:

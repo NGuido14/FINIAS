@@ -4,10 +4,11 @@ Macro Trajectory Layer
 Computes forward-looking signals that sit on top of the descriptive regime assessment.
 The descriptive layer tells you WHERE things ARE. This layer tells you WHERE things are GOING.
 
-Validated by walk-forward backtesting on 196 weekly observations (2022-2025):
-- Inflation trajectory: strongest signal (+1.74% vs -0.05% spread, 70% hit rate)
-- Stress contrarian: positive correlation with forward returns (+0.159)
-- Binding constraint transitions: shift away from inflation = +4.89% avg return
+Validated by walk-forward backtesting on 196 weekly observations (2022-2025)
+with corrected Sahm Rule computation:
+- Inflation trajectory: strongest signal (+1.32% vs -0.11% spread, 73% hit rate)
+- Stress contrarian: positive returns (+0.96%) but underperforms neutral baseline
+- Binding constraint transitions: small spread (+1.20% away vs +0.58% toward inflation)
 
 All computation is pure Python. No API calls. No Claude.
 """
@@ -255,10 +256,10 @@ def compute_inflation_trajectory(
     """
     Classify inflation trajectory from 4-week change in inflation category score.
 
-    Backtest evidence (196 obs):
-      Easing (Δ > +0.02):  87 obs, avg 20d return +1.74%, hit rate 70%
-      Tightening (Δ < -0.02): 44 obs, avg 20d return -0.05%, hit rate 48%
-      Stable: 61 obs, avg 20d return +1.39%, hit rate 80%
+    Backtest evidence (196 obs, corrected Sahm Rule):
+      Easing (Δ > +0.02):     22 obs, avg 20d return +1.32%, hit rate 73%
+      Tightening (Δ < -0.02): 11 obs, avg 20d return -0.11%, hit rate 45%
+      Stable:                 163 obs, avg 20d return +1.06%, hit rate 67%
     """
     change = current_inflation_score - prior_inflation_score
 
@@ -280,8 +281,11 @@ def compute_stress_contrarian(
     """
     Stress contrarian signal.
 
-    Backtest evidence: stress 4w change correlates +0.159 with 60d forward returns.
-    Rising stress = market overreacting = future buying opportunity.
+    Backtest evidence (196 obs, corrected):
+      Opportunity (rising stress): avg 20d return +0.96%, 71% hit rate (41 obs)
+      Caution (falling stress):    avg 20d return -0.08%, 64% hit rate (14 obs)
+      NOTE: Opportunity underperforms neutral baseline (+1.15%). Use as confirming
+      signal alongside inflation trajectory, not as standalone.
 
     Signal:
       opportunity: stress rising from below median (fear building, likely overdone)
@@ -307,13 +311,14 @@ def compute_binding_shift(
     """
     Detect binding constraint transitions.
 
-    Backtest evidence (196 obs):
-      inflation → growth_cycle:   +4.89% avg 20d return (4 obs)
-      growth_cycle → inflation:   -1.93% avg 20d return (3 obs)
-      inflation → monetary:       +1.42% avg 20d return (2 obs)
-      monetary → inflation:       -0.68% avg 20d return (2 obs)
+    Backtest evidence (196 obs, corrected Sahm Rule):
+      Shift away from inflation: avg 20d return +1.20% (8 obs)
+      Shift toward inflation:    avg 20d return +0.58% (7 obs)
+      No shift:                  avg 20d return +1.03% (181 obs)
 
-    Key insight: shifts AWAY from inflation are positive. Shifts TOWARD inflation are negative.
+    NOTE: The spread between away/toward is much smaller than originally measured
+    (+4.58%/-0.50% in prior run). Do not weight binding shifts as a primary signal.
+    The inflation trajectory signal is more reliable.
     """
     if current_binding == prior_binding or not current_binding or not prior_binding:
         return {"shifted": False, "direction": "none", "prior": prior_binding or "none"}

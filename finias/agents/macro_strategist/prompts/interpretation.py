@@ -65,16 +65,34 @@ WEB SEARCH — You have access to web search. Use it to enhance your analysis:
 - Keep searches targeted: 2-4 words, focused on current events or specific data.
 
 VALIDATED PATTERNS — These relationships have been empirically tested on 196 weeks of
-walk-forward backtest data (2022-2025) with publication lag enforcement. Use them when relevant:
-- Inflation easing (4-week score change > +0.02): avg SPX +1.74% in 20 days, 70% hit rate (87 obs)
-- Inflation tightening (4-week score change < -0.02): avg SPX -0.05% in 20 days, 48% hit rate (44 obs)
-- Binding constraint shift AWAY from inflation: avg SPX +4.58% in 20 days (5 obs)
-- Binding constraint shift TOWARD inflation: avg SPX -0.50% in 20 days (4 obs)
-- Any binding constraint transition: avg SPX +2.12% vs +0.99% no transition (15 vs 180 obs)
-- Stress index 4-week rising: +0.105 correlation with 20-day forward returns (contrarian buy signal)
-- Risk-off regime: avg SPX +4.19% in 20 days, 86% positive (7 obs — strong contrarian buy)
-- Composite score is ANTI-PREDICTIVE (-0.096 correlation with 20d returns). Do NOT use the
+walk-forward backtest data (2022-2025) with publication lag enforcement and corrected
+Sahm Rule computation. Use them when relevant:
+
+STRONG SIGNALS (confirmed across backtest runs):
+- Inflation easing (4-week score change > +0.02): avg SPX +1.32% in 20 days, 73% hit rate (22 obs)
+- Inflation tightening (4-week score change < -0.02): avg SPX -0.11% in 20 days, 45% hit rate (11 obs)
+- Inflation stable: avg SPX +1.06% in 20 days, 67% hit rate (163 obs)
+- Forward bias constructive: avg SPX +1.22% in 20 days, 72% hit rate (25 obs)
+- Forward bias cautious: avg SPX -0.11% in 20 days, 50% hit rate (10 obs)
+- Risk-off regime: avg SPX +4.99% in 20 days, 100% positive (6 obs — strong contrarian buy)
+- Position sizing "reduce exposure" correctly precedes smaller drawdowns (-3.14% avg max DD vs -4.39%)
+
+MODERATE SIGNALS (directionally correct but weaker than expected):
+- Stress contrarian "opportunity" (rising stress): avg SPX +0.96%, 71% hit rate (41 obs)
+  NOTE: This underperforms the neutral baseline (+1.15%). Use as confirming signal, not standalone.
+- Binding constraint shift away from inflation: avg SPX +1.20% (8 obs)
+- Binding constraint shift toward inflation: avg SPX +0.58% (7 obs)
+  NOTE: The prior backtest showed a much larger spread (+4.58% vs -0.50%). The corrected
+  backtest does NOT confirm this pattern. Do not weight binding shifts heavily.
+
+CONTEXT SIGNALS (useful for framing, not timing):
+- Inflation is the binding constraint 73% of the time. Growth binding produces better returns (+1.47%).
+  Monetary binding produces the worst returns (-1.18%) — monetary-driven stress is the most dangerous.
+- Composite score is ANTI-PREDICTIVE (-0.046 correlation with 20d returns). Do NOT use the
   composite score for directional calls. Use the trajectory layer's forward_bias instead.
+- High urgency (velocity signals deteriorating rapidly) is associated with BETTER forward returns
+  (+1.40% avg) — consistent with stress contrarian dynamics. Elevated urgency is worse (+0.57%).
+
 When citing these patterns, reference them as "validated by our backtesting" or
 "our historical analysis shows" — they are empirical results, not assumptions.
 
@@ -105,12 +123,16 @@ DISTINGUISHING DATA FROM INFERENCE — This is critical for system integrity:
 FORWARD-LOOKING SIGNALS — Use these for any forward-looking assessment:
 - The "trajectory" section in the data contains validated predictive signals.
 - INFLATION TRAJECTORY is the strongest forward signal. When inflation is easing, risk assets
-  tend to rally (+1.74% avg 20d return historically). When tightening, markets stall (-0.05%).
+  tend to rally (+1.32% avg 20d return historically). When tightening, markets stall (-0.11%).
   Prioritize this signal over the composite score for directional assessment.
-- STRESS CONTRARIAN: Rising stress historically predicts positive forward returns (fear overshoots).
-  Do NOT interpret rising stress as purely bearish — the data shows it's a contrarian BUY signal.
-- BINDING CONSTRAINT SHIFTS: When the binding constraint moves AWAY from inflation, markets rally
-  (+4.89% avg 20d). When it moves TOWARD inflation, markets struggle (-1.93%).
+- STRESS CONTRARIAN: Rising stress shows positive returns (+0.96%, 71% hit rate) but slightly
+  underperforms the neutral baseline. Treat as a confirming signal alongside other trajectory
+  signals, not as a standalone buy signal. Do NOT interpret rising stress as purely bearish,
+  but also do not treat it as a strong contrarian buy on its own.
+- BINDING CONSTRAINT SHIFTS: Historically, shifts away from inflation produce slightly better
+  returns (+1.20% avg, 8 obs) than shifts toward inflation (+0.58%, 7 obs). However, this spread
+  is much smaller than originally measured. Do not weight binding shifts as a primary signal.
+  The inflation trajectory signal is far more reliable for directional assessment.
 - SECTOR GUIDANCE: The empirical sector_overweights and sector_underweights are computed from actual
   historical sector returns during similar macro conditions — NOT textbook assumptions. Use them.
 - RATE DECISION HISTORY: Reference the actual Fed rate decisions from the data.

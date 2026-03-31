@@ -190,6 +190,128 @@ async def generate_report(db: DatabasePool, run_id: str) -> None:
         print(f"    Avg 20d return after transition: {np.mean(transition_returns):+.2f}%")
         print(f"    Std: {np.std(transition_returns):.2f}%")
 
+    # --- 8. TRAJECTORY SIGNAL VALIDATION ---
+    print("-" * 70)
+    print("  8. TRAJECTORY SIGNAL VALIDATION")
+    print("-" * 70)
+
+    # Load trajectory data
+    traj_rows = await db.fetch(
+        """
+        SELECT sim_date, trajectory_json, spx_fwd_20d
+        FROM backtest_results
+        WHERE backtest_run_id = $1 AND warmup = FALSE
+          AND trajectory_json IS NOT NULL AND spx_fwd_20d IS NOT NULL
+        ORDER BY sim_date ASC
+        """,
+        run_id
+    )
+
+    if not traj_rows:
+        print("  No trajectory data available.\n")
+    else:
+        import json as json_mod
+
+        # Parse trajectory data
+        traj_data = []
+        for r in traj_rows:
+            tj = json_mod.loads(r["trajectory_json"]) if isinstance(r["trajectory_json"], str) else r["trajectory_json"]
+            tj["_fwd_20d"] = float(r["spx_fwd_20d"])
+            tj["_date"] = r["sim_date"]
+            traj_data.append(tj)
+
+        print(f"  Observations with trajectory data: {len(traj_data)}\n")
+
+        # 8a. Forward Bias → Returns
+        print("  8a. Forward Bias Signal")
+        for bias_val in ["constructive", "neutral", "cautious"]:
+            subset = [t for t in traj_data if t.get("forward_bias") == bias_val]
+            if subset:
+                returns = [t["_fwd_20d"] for t in subset]
+                avg_ret = sum(returns) / len(returns)
+                hit_rate = sum(1 for r in returns if r > 0) / len(returns) * 100
+                print(f"    {bias_val:14s}: avg 20d return {avg_ret:+.2f}%, hit rate {hit_rate:.0f}%, count {len(subset)}")
+        print()
+
+        # 8b. Inflation Trajectory → Returns
+        print("  8b. Inflation Trajectory Signal (STRONGEST in prior backtest)")
+        for traj_val in ["easing", "stable", "tightening"]:
+            subset = [t for t in traj_data if t.get("inflation_trajectory") == traj_val]
+            if subset:
+                returns = [t["_fwd_20d"] for t in subset]
+                avg_ret = sum(returns) / len(returns)
+                hit_rate = sum(1 for r in returns if r > 0) / len(returns) * 100
+                print(f"    {traj_val:14s}: avg 20d return {avg_ret:+.2f}%, hit rate {hit_rate:.0f}%, count {len(subset)}")
+        print()
+
+        # 8c. Stress Contrarian → Returns
+        print("  8c. Stress Contrarian Signal")
+        for stress_val in ["opportunity", "neutral", "caution"]:
+            subset = [t for t in traj_data if t.get("stress_contrarian") == stress_val]
+            if subset:
+                returns = [t["_fwd_20d"] for t in subset]
+                avg_ret = sum(returns) / len(returns)
+                hit_rate = sum(1 for r in returns if r > 0) / len(returns) * 100
+                print(f"    {stress_val:14s}: avg 20d return {avg_ret:+.2f}%, hit rate {hit_rate:.0f}%, count {len(subset)}")
+        print()
+
+        # 8d. Binding Constraint Shifts → Returns
+        print("  8d. Binding Constraint Shift Signal")
+        shifts = [t for t in traj_data if t.get("binding_shifted")]
+        no_shifts = [t for t in traj_data if not t.get("binding_shifted")]
+        if shifts:
+            shift_returns = [t["_fwd_20d"] for t in shifts]
+            print(f"    Shift occurred:  avg 20d return {sum(shift_returns)/len(shift_returns):+.2f}%, count {len(shifts)}")
+
+            # Break down by direction
+            for direction in ["away_from_inflation", "toward_inflation"]:
+                dir_subset = [t for t in shifts if t.get("binding_shift_direction") == direction]
+                if dir_subset:
+                    dir_returns = [t["_fwd_20d"] for t in dir_subset]
+                    print(f"      {direction}: avg {sum(dir_returns)/len(dir_returns):+.2f}%, count {len(dir_subset)}")
+        if no_shifts:
+            no_shift_returns = [t["_fwd_20d"] for t in no_shifts]
+            print(f"    No shift:        avg 20d return {sum(no_shift_returns)/len(no_shift_returns):+.2f}%, count {len(no_shifts)}")
+        print()
+
+        # 8e. Position Sizing vs Drawdowns
+        print("  8e. Position Sizing vs Forward Drawdowns")
+        dd_rows = await db.fetch(
+            """
+            SELECT trajectory_json, spx_max_dd_20d
+            FROM backtest_results
+            WHERE backtest_run_id = $1 AND warmup = FALSE
+              AND trajectory_json IS NOT NULL AND spx_max_dd_20d IS NOT NULL
+            ORDER BY sim_date ASC
+            """,
+            run_id
+        )
+        if dd_rows:
+            reduce_dd = []
+            normal_dd = []
+            for r in dd_rows:
+                tj = json_mod.loads(r["trajectory_json"]) if isinstance(r["trajectory_json"], str) else r["trajectory_json"]
+                dd = float(r["spx_max_dd_20d"])
+                if tj.get("reduce_overall_exposure"):
+                    reduce_dd.append(dd)
+                else:
+                    normal_dd.append(dd)
+            if reduce_dd:
+                print(f"    Reduce exposure ON:  avg max DD {sum(reduce_dd)/len(reduce_dd):.2f}%, count {len(reduce_dd)}")
+            if normal_dd:
+                print(f"    Reduce exposure OFF: avg max DD {sum(normal_dd)/len(normal_dd):.2f}%, count {len(normal_dd)}")
+        print()
+
+        # 8f. Urgency vs Returns
+        print("  8f. Velocity Urgency vs Returns")
+        for urg_val in ["high", "elevated", "normal"]:
+            subset = [t for t in traj_data if t.get("urgency") == urg_val]
+            if subset:
+                returns = [t["_fwd_20d"] for t in subset]
+                avg_ret = sum(returns) / len(returns)
+                print(f"    {urg_val:10s}: avg 20d return {avg_ret:+.2f}%, count {len(subset)}")
+        print()
+
     print(f"\n{'=' * 70}")
     print("  REPORT COMPLETE")
     print(f"{'=' * 70}\n")
