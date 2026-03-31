@@ -324,7 +324,7 @@ def _compute_sahm_rule(unemployment: list[dict]) -> tuple[float, bool]:
     """
     Sahm Rule: recession signal when the 3-month moving average of the
     unemployment rate rises 0.50 percentage points or more above its
-    12-month low.
+    12-month low OF 3-MONTH AVERAGES (not raw values).
 
     Has NEVER produced a false positive in its history.
     """
@@ -333,12 +333,19 @@ def _compute_sahm_rule(unemployment: list[dict]) -> tuple[float, bool]:
 
     values = [u["value"] for u in unemployment]
 
-    # 3-month moving average of current unemployment
-    current_3m_avg = np.mean(values[-3:])
+    # Compute ALL rolling 3-month averages
+    rolling_3m = []
+    for i in range(2, len(values)):
+        avg = np.mean(values[i-2:i+1])
+        rolling_3m.append(avg)
 
-    # 12-month low (using months before the current 3-month window)
-    lookback = values[:-3] if len(values) > 15 else values[:-3]
-    twelve_month_window = lookback[-12:] if len(lookback) >= 12 else lookback
+    # Current 3-month average (last element)
+    current_3m_avg = rolling_3m[-1]
+
+    # 12-month low of 3-month averages (excluding current)
+    # Look back 12 months before the current reading
+    prior_averages = rolling_3m[:-1]
+    twelve_month_window = prior_averages[-12:] if len(prior_averages) >= 12 else prior_averages
 
     if not twelve_month_window:
         return 0.0, False

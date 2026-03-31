@@ -145,5 +145,19 @@ Respond with ONLY a JSON object (no markdown, no backticks) in this exact format
         "Specific metric at specific level — what happens if it crosses (e.g., 'Sahm at 0.37 — if crosses 0.50, recession confirmed')",
         "Second watch item with threshold",
         "Third watch item with threshold"
-    ]
-}}"""
+    ],
+    "key_metrics": {{
+        "vix": <current VIX level from data>,
+        "core_pce_yoy": <core PCE year-over-year % from data>,
+        "core_pce_3m_annualized": <3-month annualized core PCE % from data>,
+        "hy_spread": <high yield OAS spread % from data>,
+        "oil_wti": <WTI oil price $ from data>,
+        "fed_funds": <effective fed funds rate % from data>,
+        "net_liquidity_trillion": <net liquidity in trillions $ from data>,
+        "sahm_value": <Sahm Rule value from data>,
+        "composite_score": <regime composite score from data>,
+        "forward_bias": "<constructive/neutral/cautious from trajectory>"
+    }}
+}}
+
+The key_metrics dict must contain EXACT values copied from the regime data JSON — do not round or approximate. These are used by downstream agents for precise decision-making."""

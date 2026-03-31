@@ -90,5 +90,9 @@ def test_settings():
     from finias.core.config.settings import Settings
     settings = Settings()
     assert settings.postgres_host == "localhost"
+    assert settings.postgres_port == 5434
+    assert settings.postgres_db == "finias_agency"
     assert settings.environment == "development"
-    assert settings.claude_model == "claude-sonnet-4-20250514"
+    # claude_model may be overridden by .env, so check it's a valid model string
+    assert "claude" in settings.claude_model
+    assert "claude" in settings.claude_model_fast

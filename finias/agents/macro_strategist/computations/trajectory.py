@@ -845,6 +845,40 @@ FOMC_DATES_2026 = [
     "2026-07-29", "2026-09-16", "2026-11-04", "2026-12-16",
 ]
 
+FOMC_DATES_BY_YEAR = {
+    2026: FOMC_DATES_2026,
+}
+
+def _get_fomc_dates(year: int) -> list[str]:
+    """
+    Get FOMC meeting dates for a given year.
+
+    Uses exact dates when available (hardcoded from Fed schedule).
+    Falls back to approximate dates (8 meetings, ~6 weeks apart) when
+    exact dates haven't been added yet.
+    """
+    if year in FOMC_DATES_BY_YEAR:
+        return FOMC_DATES_BY_YEAR[year]
+
+    # Approximate: 8 meetings per year, roughly every 6-7 weeks
+    # Starting late January, ending mid-December
+    import logging
+    logging.getLogger("finias.agent.macro_strategist").warning(
+        f"Using APPROXIMATE FOMC dates for {year}. "
+        f"Update FOMC_DATES_BY_YEAR[{year}] with exact dates from the Fed schedule."
+    )
+
+    approximate_dates = []
+    # Typical FOMC pattern: late Jan, mid Mar, early May, mid Jun, late Jul, mid Sep, early Nov, mid Dec
+    month_days = [(1, 28), (3, 18), (5, 6), (6, 17), (7, 29), (9, 16), (11, 4), (12, 16)]
+    for month, day in month_days:
+        try:
+            approximate_dates.append(date(year, month, day).isoformat())
+        except ValueError:
+            pass
+
+    return approximate_dates
+
 # CPI release dates are typically the 2nd or 3rd week of each month
 # NFP is first Friday of each month
 # These are approximate — exact dates published by BLS
@@ -867,7 +901,8 @@ def compute_event_calendar(as_of_date: date = None) -> dict:
     events = []
 
     # FOMC meetings
-    for fomc_str in FOMC_DATES_2026:
+    fomc_dates = _get_fomc_dates(as_of_date.year)
+    for fomc_str in fomc_dates:
         fomc_date = date.fromisoformat(fomc_str)
         days_away = (fomc_date - as_of_date).days
         if 0 <= days_away <= 30:

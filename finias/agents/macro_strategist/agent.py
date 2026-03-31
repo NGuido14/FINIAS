@@ -18,6 +18,7 @@ from typing import Any, Optional
 from datetime import date, datetime, timedelta, timezone
 import json
 import logging
+import re
 
 import numpy as np
 import anthropic
@@ -32,14 +33,28 @@ from finias.core.state.redis_state import RedisState
 from finias.data.cache.market_cache import MarketDataCache
 
 # Computations
-from finias.agents.macro_strategist.computations.yield_curve import analyze_yield_curve
-from finias.agents.macro_strategist.computations.volatility import analyze_volatility
-from finias.agents.macro_strategist.computations.breadth import analyze_breadth
-from finias.agents.macro_strategist.computations.cross_asset import analyze_cross_assets
+from finias.agents.macro_strategist.computations.yield_curve import (
+    analyze_yield_curve, YieldCurveAnalysis
+)
+from finias.agents.macro_strategist.computations.volatility import (
+    analyze_volatility, VolatilityAnalysis
+)
+from finias.agents.macro_strategist.computations.breadth import (
+    analyze_breadth, BreadthAnalysis
+)
+from finias.agents.macro_strategist.computations.cross_asset import (
+    analyze_cross_assets, CrossAssetAnalysis
+)
 from finias.agents.macro_strategist.computations.regime import detect_regime
-from finias.agents.macro_strategist.computations.monetary_policy import analyze_monetary_policy
-from finias.agents.macro_strategist.computations.business_cycle import analyze_business_cycle
-from finias.agents.macro_strategist.computations.inflation import analyze_inflation
+from finias.agents.macro_strategist.computations.monetary_policy import (
+    analyze_monetary_policy, MonetaryPolicyAnalysis
+)
+from finias.agents.macro_strategist.computations.business_cycle import (
+    analyze_business_cycle, BusinessCycleAnalysis
+)
+from finias.agents.macro_strategist.computations.inflation import (
+    analyze_inflation, InflationAnalysis
+)
 from finias.agents.macro_strategist.computations.trajectory import compute_trajectory
 from finias.agents.macro_strategist.prompts.interpretation import MACRO_INTERPRETATION_PROMPT
 
@@ -116,6 +131,59 @@ def _generate_correlation_notes_from_dict(corr_dict: dict) -> list[str]:
         )
 
     return notes
+
+
+def _extract_interpretation_json(text: str) -> dict:
+    """
+    Extract the interpretation JSON from Claude's response text.
+
+    Claude's response may contain web search content with embedded JSON
+    (JSON-LD, API responses, etc.). This function looks for a JSON block
+    containing the expected interpretation keys rather than naively taking
+    the outermost {}.
+
+    Falls back to the outermost {} approach if targeted extraction fails.
+    """
+    # Strategy 1: Find JSON blocks and look for one with expected keys
+    expected_keys = {"summary", "key_findings", "risks", "watch_items"}
+
+    # Try to find JSON blocks by matching balanced braces
+    depth = 0
+    start_positions = []
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if depth == 0:
+                start_positions.append(i)
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0 and start_positions:
+                candidate = text[start_positions[-1]:i+1]
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict) and expected_keys.intersection(parsed.keys()):
+                        return parsed
+                except json.JSONDecodeError:
+                    continue
+
+    # Strategy 2: Fallback to outermost {} (original approach)
+    json_start = text.find("{")
+    json_end = text.rfind("}") + 1
+    if json_start >= 0 and json_end > json_start:
+        try:
+            return json.loads(text[json_start:json_end])
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: Return empty dict (caller handles defaults)
+    return {}
+
+
+def _strip_cite_tags(text: str) -> str:
+    """Remove <cite index="...">...</cite> tags, keeping the inner text."""
+    if not isinstance(text, str):
+        return text
+    return re.sub(r'</?cite[^>]*>', '', text)
 
 
 class MacroStrategist(BaseAgent):
@@ -273,119 +341,168 @@ class MacroStrategist(BaseAgent):
             logger.warning(f"Missing Polygon symbols ({len(missing_polygon)}): {', '.join(missing_polygon)}")
 
         # === Run ALL computation modules ===
+        _computation_failures = []
 
         # 1. Yield Curve (enhanced)
-        yc_analysis = analyze_yield_curve(
-            yields_2y=fred_data.get("DGS2", []),
-            yields_5y=fred_data.get("DGS5", []),
-            yields_10y=fred_data.get("DGS10", []),
-            yields_30y=fred_data.get("DGS30", []),
-            yields_3m=fred_data.get("DTB3", []),
-            fed_funds=fred_data.get("FEDFUNDS", []),
-            real_yields_5y=fred_data.get("DFII5", []),
-            real_yields_10y=fred_data.get("DFII10", []),
-            term_premium_10y=fred_data.get("THREEFYTP10", []),
-        )
+        try:
+            yc_analysis = analyze_yield_curve(
+                yields_2y=fred_data.get("DGS2", []),
+                yields_5y=fred_data.get("DGS5", []),
+                yields_10y=fred_data.get("DGS10", []),
+                yields_30y=fred_data.get("DGS30", []),
+                yields_3m=fred_data.get("DTB3", []),
+                fed_funds=fred_data.get("FEDFUNDS", []),
+                real_yields_5y=fred_data.get("DFII5", []),
+                real_yields_10y=fred_data.get("DFII10", []),
+                term_premium_10y=fred_data.get("THREEFYTP10", []),
+            )
+        except Exception as e:
+            logger.error(f"Yield curve computation failed: {e}")
+            yc_analysis = YieldCurveAnalysis(
+                t3m=None, t2y=None, t5y=None, t10y=None, t30y=None,
+                spread_2s10s=None, spread_3m10y=None, spread_2s30s=None,
+                spread_2s10s_change_30d=None, spread_2s10s_change_90d=None,
+                is_2s10s_inverted=False, is_3m10y_inverted=False,
+                inversion_depth_2s10s=0.0, days_inverted_2s10s=0,
+                curve_shape="unknown", recession_signal_score=0.0
+            )
+            _computation_failures.append("yield_curve")
 
         # 2. Volatility (enhanced with term structure)
-        vol_analysis = analyze_volatility(
-            vix_series=fred_data.get("VIXCLS", []),
-            spx_prices=spx_prices,
-            vix3m_series=fred_data.get("VXVCLS", []),
-        )
-        # Add correlation if we have sector data
-        if len(sector_prices) >= 5:
-            from finias.agents.macro_strategist.computations.volatility import (
-                compute_sector_correlation, classify_correlation_regime
+        try:
+            vol_analysis = analyze_volatility(
+                vix_series=fred_data.get("VIXCLS", []),
+                spx_prices=spx_prices,
+                vix3m_series=fred_data.get("VXVCLS", []),
             )
-            avg_corr = compute_sector_correlation(sector_prices)
-            vol_analysis.sector_correlation = avg_corr
-            vol_analysis.correlation_regime = classify_correlation_regime(avg_corr)
+            # Add correlation if we have sector data
+            if len(sector_prices) >= 5:
+                from finias.agents.macro_strategist.computations.volatility import (
+                    compute_sector_correlation, classify_correlation_regime
+                )
+                avg_corr = compute_sector_correlation(sector_prices)
+                vol_analysis.sector_correlation = avg_corr
+                vol_analysis.correlation_regime = classify_correlation_regime(avg_corr)
+        except Exception as e:
+            logger.error(f"Volatility computation failed: {e}")
+            vol_analysis = VolatilityAnalysis(
+                vix_current=None, vix_percentile_1y=None,
+                vix_change_1d=None, vix_change_5d=None, vix_change_20d=None,
+                vix_sma_20=None, vix_is_elevated=False, vix_is_spike=False,
+                realized_vol_20d=None, realized_vol_60d=None, iv_rv_spread=None,
+                vol_regime="unknown", vol_risk_score=0.0
+            )
+            _computation_failures.append("volatility")
 
         # 3. Breadth (now uses real ETF data)
-        breadth_analysis = analyze_breadth(
-            spx_prices=spx_prices,
-            sector_prices=sector_prices,
-            rsp_prices=additional_symbols.get("RSP"),
-        )
+        try:
+            breadth_analysis = analyze_breadth(
+                spx_prices=spx_prices,
+                sector_prices=sector_prices,
+                rsp_prices=additional_symbols.get("RSP"),
+            )
+        except Exception as e:
+            logger.error(f"Breadth computation failed: {e}")
+            breadth_analysis = BreadthAnalysis()
+            _computation_failures.append("breadth")
 
         # 4. Cross-Asset (expanded with intermarket signals)
-        ca_analysis = analyze_cross_assets(
-            dxy_series=fred_data.get("DTWEXBGS", []),
-            hy_spread_series=fred_data.get("BAMLH0A0HYM2", []),
-            breakeven_5y=fred_data.get("T5YIE", []),
-            breakeven_10y=fred_data.get("T10YIE", []),
-            copper_prices=additional_symbols.get("CPER"),
-            gold_prices=additional_symbols.get("GLD"),
-            oil_series=fred_data.get("DCOILWTICO", []),
-            spy_prices=spx_prices,
-            tlt_prices=additional_symbols.get("TLT"),
-            iwm_prices=additional_symbols.get("IWM"),
-            hyg_prices=additional_symbols.get("HYG"),
-            eem_prices=additional_symbols.get("EEM"),
-            vix_series=fred_data.get("VIXCLS", []),
-        )
+        try:
+            ca_analysis = analyze_cross_assets(
+                dxy_series=fred_data.get("DTWEXBGS", []),
+                hy_spread_series=fred_data.get("BAMLH0A0HYM2", []),
+                breakeven_5y=fred_data.get("T5YIE", []),
+                breakeven_10y=fred_data.get("T10YIE", []),
+                copper_prices=additional_symbols.get("CPER"),
+                gold_prices=additional_symbols.get("GLD"),
+                oil_series=fred_data.get("DCOILWTICO", []),
+                spy_prices=spx_prices,
+                tlt_prices=additional_symbols.get("TLT"),
+                iwm_prices=additional_symbols.get("IWM"),
+                hyg_prices=additional_symbols.get("HYG"),
+                eem_prices=additional_symbols.get("EEM"),
+                vix_series=fred_data.get("VIXCLS", []),
+            )
+        except Exception as e:
+            logger.error(f"Cross-asset computation failed: {e}")
+            ca_analysis = CrossAssetAnalysis()
+            _computation_failures.append("cross_asset")
 
         # 5. Monetary Policy (NEW)
-        mp_analysis = analyze_monetary_policy(
-            fed_funds=fred_data.get("FEDFUNDS", []),
-            fed_target_upper=fred_data.get("DFEDTARU", []),
-            fed_target_lower=fred_data.get("DFEDTARL", []),
-            fed_total_assets=fred_data.get("WALCL", []),
-            fed_treasuries=fred_data.get("TREAST", []),
-            fed_mbs=fred_data.get("WSHOMCB", []),
-            tga=fred_data.get("WTREGEN", []),
-            reverse_repo=fred_data.get("RRPONTSYD", []),
-            bank_reserves=fred_data.get("WRESBAL", []),
-            nfci_series=fred_data.get("NFCI", []),
-            stress_series=fred_data.get("STLFSI4", []),
-            bank_credit=fred_data.get("TOTBKCR", []),
-            consumer_credit=fred_data.get("TOTALSL", []),
-            m2_series=fred_data.get("M2SL", []),
-        )
+        try:
+            mp_analysis = analyze_monetary_policy(
+                fed_funds=fred_data.get("FEDFUNDS", []),
+                fed_target_upper=fred_data.get("DFEDTARU", []),
+                fed_target_lower=fred_data.get("DFEDTARL", []),
+                fed_total_assets=fred_data.get("WALCL", []),
+                fed_treasuries=fred_data.get("TREAST", []),
+                fed_mbs=fred_data.get("WSHOMCB", []),
+                tga=fred_data.get("WTREGEN", []),
+                reverse_repo=fred_data.get("RRPONTSYD", []),
+                bank_reserves=fred_data.get("WRESBAL", []),
+                nfci_series=fred_data.get("NFCI", []),
+                stress_series=fred_data.get("STLFSI4", []),
+                bank_credit=fred_data.get("TOTBKCR", []),
+                consumer_credit=fred_data.get("TOTALSL", []),
+                m2_series=fred_data.get("M2SL", []),
+            )
+        except Exception as e:
+            logger.error(f"Monetary policy computation failed: {e}")
+            mp_analysis = MonetaryPolicyAnalysis()
+            _computation_failures.append("monetary_policy")
 
         # 6. Business Cycle (NEW)
-        cycle_analysis = analyze_business_cycle(
-            lei_series=[],  # Conference Board LEI removed from FRED; module handles gracefully
-            unemployment=fred_data.get("UNRATE", []),
-            initial_claims=fred_data.get("ICSA", []),
-            continuing_claims=fred_data.get("CCSA", []),
-            jolts_openings=fred_data.get("JTSJOL", []),
-            jolts_quits=fred_data.get("JTSQUR", []),
-            temp_employment=fred_data.get("TEMPHELPS", []),
-            avg_weekly_hours=fred_data.get("AWHAETP", []),
-            building_permits=fred_data.get("PERMIT", []),
-            housing_starts=fred_data.get("HOUST", []),
-            retail_sales=fred_data.get("RSAFS", []),
-            consumer_sentiment=fred_data.get("UMCSENT", []),
-            industrial_production=fred_data.get("INDPRO", []),
-            capacity_utilization=fred_data.get("TCU", []),
-            cfnai_series=fred_data.get("CFNAI", []),
-            personal_income=fred_data.get("PI", []),
-            durable_goods=fred_data.get("DGORDER", []),
-            nfp_series=fred_data.get("PAYEMS", []),
-            philly_fed=fred_data.get("GACDFSA066MSFRBPHI", []),
-            gdp_nowcast_series=fred_data.get("GDPNOW", []),
-        )
+        try:
+            cycle_analysis = analyze_business_cycle(
+                lei_series=[],  # Conference Board LEI removed from FRED; module handles gracefully
+                unemployment=fred_data.get("UNRATE", []),
+                initial_claims=fred_data.get("ICSA", []),
+                continuing_claims=fred_data.get("CCSA", []),
+                jolts_openings=fred_data.get("JTSJOL", []),
+                jolts_quits=fred_data.get("JTSQUR", []),
+                temp_employment=fred_data.get("TEMPHELPS", []),
+                avg_weekly_hours=fred_data.get("AWHAETP", []),
+                building_permits=fred_data.get("PERMIT", []),
+                housing_starts=fred_data.get("HOUST", []),
+                retail_sales=fred_data.get("RSAFS", []),
+                consumer_sentiment=fred_data.get("UMCSENT", []),
+                industrial_production=fred_data.get("INDPRO", []),
+                capacity_utilization=fred_data.get("TCU", []),
+                cfnai_series=fred_data.get("CFNAI", []),
+                personal_income=fred_data.get("PI", []),
+                durable_goods=fred_data.get("DGORDER", []),
+                nfp_series=fred_data.get("PAYEMS", []),
+                philly_fed=fred_data.get("GACDFSA066MSFRBPHI", []),
+                gdp_nowcast_series=fred_data.get("GDPNOW", []),
+            )
+        except Exception as e:
+            logger.error(f"Business cycle computation failed: {e}")
+            cycle_analysis = BusinessCycleAnalysis()
+            _computation_failures.append("business_cycle")
 
         # 7. Inflation (NEW)
-        infl_analysis = analyze_inflation(
-            cpi_all=fred_data.get("CPIAUCSL", []),
-            cpi_core=fred_data.get("CPILFESL", []),
-            cpi_shelter=fred_data.get("CUSR0000SEHC", []),
-            cpi_services=fred_data.get("CUSR0000SAS", []),
-            pce=fred_data.get("PCEPI", []),
-            core_pce=fred_data.get("PCEPILFE", []),
-            sticky_cpi=fred_data.get("STICKCPIM159SFRBATL", []),
-            flexible_cpi=fred_data.get("FLEXCPIM159SFRBATL", []),
-            trimmed_mean=fred_data.get("PCETRIM12M159SFRBDAL", []),
-            breakeven_5y=fred_data.get("T5YIE", []),
-            breakeven_10y=fred_data.get("T10YIE", []),
-            forward_5y5y=fred_data.get("T5YIFR", []),
-            ppi=fred_data.get("PPIACO", []),
-            ahe=fred_data.get("CES0500000003", []),
-            oil=fred_data.get("DCOILWTICO", []),
-        )
+        try:
+            infl_analysis = analyze_inflation(
+                cpi_all=fred_data.get("CPIAUCSL", []),
+                cpi_core=fred_data.get("CPILFESL", []),
+                cpi_shelter=fred_data.get("CUSR0000SEHC", []),
+                cpi_services=fred_data.get("CUSR0000SAS", []),
+                pce=fred_data.get("PCEPI", []),
+                core_pce=fred_data.get("PCEPILFE", []),
+                sticky_cpi=fred_data.get("STICKCPIM159SFRBATL", []),
+                flexible_cpi=fred_data.get("FLEXCPIM159SFRBATL", []),
+                trimmed_mean=fred_data.get("PCETRIM12M159SFRBDAL", []),
+                breakeven_5y=fred_data.get("T5YIE", []),
+                breakeven_10y=fred_data.get("T10YIE", []),
+                forward_5y5y=fred_data.get("T5YIFR", []),
+                ppi=fred_data.get("PPIACO", []),
+                ahe=fred_data.get("CES0500000003", []),
+                oil=fred_data.get("DCOILWTICO", []),
+            )
+        except Exception as e:
+            logger.error(f"Inflation computation failed: {e}")
+            infl_analysis = InflationAnalysis()
+            _computation_failures.append("inflation")
 
         # === Detect regime with full hierarchy ===
         # Load historical data for dynamic weighting
@@ -445,6 +562,10 @@ class MacroStrategist(BaseAgent):
             "polygon_available": len(sector_etfs) + len(additional_symbols) + 1 - len(missing_polygon),
         }
 
+        # Attach computation failures if any
+        if _computation_failures:
+            regime_assessment._data_gaps["computation_failures"] = _computation_failures
+
         # === Compute Trajectory Layer ===
         # Get prior assessment for trajectory change signals
         prior_regime = None
@@ -480,7 +601,16 @@ class MacroStrategist(BaseAgent):
 
         # === Publish to shared state (Redis) ===
         regime_dict = regime_assessment.to_dict()
-        regime_dict["interpretation"] = interpretation  # Claude's full analysis + web search context
+        # Strip citation tags before publishing
+        clean_interp = {}
+        for key, value in interpretation.items():
+            if isinstance(value, str):
+                clean_interp[key] = _strip_cite_tags(value)
+            elif isinstance(value, list):
+                clean_interp[key] = [_strip_cite_tags(item) if isinstance(item, str) else item for item in value]
+            else:
+                clean_interp[key] = value
+        regime_dict["interpretation"] = clean_interp
         await self.state.set_regime(regime_dict)
         await self.state.publish_opinion(self.name, regime_dict)
 
@@ -578,14 +708,18 @@ class MacroStrategist(BaseAgent):
             question=question,
         )
 
-        response = await self._client.messages.create(
-            model=settings.claude_model,
-            max_tokens=3000,
-            tools=[{
-                "type": "web_search_20250305",
-                "name": "web_search",
-            }],
-            messages=[{"role": "user", "content": prompt}],
+        from finias.core.utils.retry import retry_claude_call
+
+        response = await retry_claude_call(
+            lambda: self._client.messages.create(
+                model=settings.claude_model,
+                max_tokens=3000,
+                tools=[{
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                }],
+                messages=[{"role": "user", "content": prompt}],
+            )
         )
 
         # Extract text from potentially multi-block response
@@ -599,15 +733,20 @@ class MacroStrategist(BaseAgent):
 
         # Claude returns JSON with macro_regime, binding_constraint, summary, key_findings, risks, watch_items
         try:
-            # Try to find JSON in the response (may be surrounded by web search results)
-            # Look for the outermost { } pair
-            json_start = text.find("{")
-            json_end = text.rfind("}") + 1
-            if json_start >= 0 and json_end > json_start:
-                json_text = text[json_start:json_end]
-                result = json.loads(json_text)
-            else:
-                raise json.JSONDecodeError("No JSON found", text, 0)
+            result = _extract_interpretation_json(text)
+            if not result:
+                # Try parsing the full text directly before falling back
+                try:
+                    text_stripped = text.strip()
+                    if text_stripped.startswith("{"):
+                        result = json.loads(text_stripped)
+                        if not isinstance(result, dict) or "summary" not in result:
+                            result = {}
+                except (json.JSONDecodeError, ValueError):
+                    result = {}
+
+                if not result:
+                    raise json.JSONDecodeError("No valid interpretation JSON found", text, 0)
 
             # Ensure all expected keys exist
             result.setdefault("summary", "")
@@ -616,6 +755,7 @@ class MacroStrategist(BaseAgent):
             result.setdefault("watch_items", [])
             result.setdefault("macro_regime", "")
             result.setdefault("binding_constraint", "")
+            result.setdefault("key_metrics", {})
 
             # Prepend binding constraint to summary for downstream visibility
             if result["binding_constraint"] and result["binding_constraint"] not in result["summary"]:
@@ -624,7 +764,6 @@ class MacroStrategist(BaseAgent):
                     + result["summary"]
                 )
         except json.JSONDecodeError:
-            # Fallback: use the raw text as summary
             result = {
                 "summary": text,
                 "key_findings": [],
@@ -632,7 +771,25 @@ class MacroStrategist(BaseAgent):
                 "watch_items": [],
                 "macro_regime": "",
                 "binding_constraint": "",
+                "key_metrics": {},
             }
+
+            # Secondary attempt: the raw text itself might be valid JSON
+            # (happens when web search content confuses the primary parser)
+            try:
+                text_stripped = text.strip()
+                if text_stripped.startswith("{"):
+                    parsed = json.loads(text_stripped)
+                    if isinstance(parsed, dict) and "summary" in parsed:
+                        result = parsed
+                        result.setdefault("key_findings", [])
+                        result.setdefault("risks", [])
+                        result.setdefault("watch_items", [])
+                        result.setdefault("macro_regime", "")
+                        result.setdefault("binding_constraint", "")
+                        result.setdefault("key_metrics", {})
+            except (json.JSONDecodeError, ValueError):
+                pass  # Keep the fallback result
 
         return result
 
@@ -791,6 +948,14 @@ class MacroStrategist(BaseAgent):
                     f"- DATA GAPS: Missing {'; '.join(gap_parts)}. "
                     f"Assessment may be incomplete for affected domains. Reduce confidence accordingly."
                 )
+
+        # --- Computation Failures ---
+        failures = (data_gaps or {}).get("computation_failures", [])
+        if failures:
+            notes.append(
+                f"- COMPUTATION FAILURES: The following modules failed and are excluded from this assessment: "
+                f"{', '.join(failures)}. Reduce confidence accordingly and note the gap in your analysis."
+            )
 
         # --- Trajectory: Rate Decision History ---
         traj = regime_dict.get("trajectory", {})
@@ -1024,6 +1189,19 @@ class MacroStrategist(BaseAgent):
         """Store the regime assessment and opinion in PostgreSQL for history."""
         import uuid
 
+        # Strip citation tags from interpretation before storing
+        clean_interpretation = {}
+        for key, value in interpretation.items():
+            if isinstance(value, str):
+                clean_interpretation[key] = _strip_cite_tags(value)
+            elif isinstance(value, list):
+                clean_interpretation[key] = [
+                    _strip_cite_tags(item) if isinstance(item, str) else item
+                    for item in value
+                ]
+            else:
+                clean_interpretation[key] = value
+
         # Store in regime_assessments
         key_levels = regime.key_levels
         await self.cache.db.execute(
@@ -1062,7 +1240,7 @@ class MacroStrategist(BaseAgent):
             key_levels.get("sahm_value"), key_levels.get("ism_manufacturing"),
             key_levels.get("hy_spread"), key_levels.get("nfci"),
             json.dumps(regime.to_dict(), default=str),  # full_regime_json — ALL 200+ fields
-            json.dumps(interpretation, default=str),     # interpretation_json — Claude's full analysis
+            json.dumps(clean_interpretation, default=str),     # interpretation_json — Claude's full analysis
         )
 
         # Store in agent_opinions
@@ -1085,12 +1263,12 @@ class MacroStrategist(BaseAgent):
             """,
             opinion_id, self.name, self.layer.value,
             direction.value, confidence.value, regime.primary_regime.value,
-            interpretation.get("summary", ""),
-            json.dumps(interpretation.get("key_findings", [])),
+            clean_interpretation.get("summary", ""),
+            json.dumps(clean_interpretation.get("key_findings", [])),
             json.dumps(regime.to_dict(), default=str),
             f"Hierarchical regime model. Binding constraint: {regime.binding_constraint}.",
-            json.dumps(interpretation.get("risks", [])),
-            json.dumps(interpretation.get("watch_items", [])),
+            json.dumps(clean_interpretation.get("risks", [])),
+            json.dumps(clean_interpretation.get("watch_items", [])),
             datetime.now(timezone.utc), 0,
             query.question, json.dumps(query.context, default=str),
         )

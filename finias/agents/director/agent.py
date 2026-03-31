@@ -93,12 +93,16 @@ class Director(BaseAgent):
         dated_system_prompt = f"TODAY'S DATE: {_date.today().isoformat()}. All dates and timeframes in your response must be relative to today. Do not reference 2024 or 2025 as future dates.\n\n" + DIRECTOR_SYSTEM_PROMPT
 
         # Initial Claude call
-        response = await self._client.messages.create(
-            model=self._model,
-            max_tokens=self._max_tokens,
-            system=dated_system_prompt,
-            tools=tools if tools else None,
-            messages=self._conversation_history,
+        from finias.core.utils.retry import retry_claude_call
+
+        response = await retry_claude_call(
+            lambda: self._client.messages.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                system=dated_system_prompt,
+                tools=tools if tools else None,
+                messages=self._conversation_history,
+            )
         )
 
         # Handle tool_use loop
@@ -151,12 +155,14 @@ class Director(BaseAgent):
             })
 
             # Continue the conversation with tool results
-            response = await self._client.messages.create(
-                model=self._model,
-                max_tokens=self._max_tokens,
-                system=dated_system_prompt,
-                tools=tools if tools else None,
-                messages=self._conversation_history,
+            response = await retry_claude_call(
+                lambda: self._client.messages.create(
+                    model=self._model,
+                    max_tokens=self._max_tokens,
+                    system=dated_system_prompt,
+                    tools=tools if tools else None,
+                    messages=self._conversation_history,
+                )
             )
 
         # Extract final text response

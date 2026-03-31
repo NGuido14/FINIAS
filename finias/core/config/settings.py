@@ -7,10 +7,10 @@ class Settings(BaseSettings):
 
     # Database
     postgres_host: str = "localhost"
-    postgres_port: int = 5432
-    postgres_db: str = "finias"
-    postgres_user: str = "finias"
-    postgres_password: str = ""
+    postgres_port: int = 5434
+    postgres_db: str = "finias_agency"
+    postgres_user: str = "finias_agency"
+    postgres_password: str = "finias"
 
     # Redis
     redis_host: str = "localhost"
@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     fred_api_key: str = ""
 
     # Claude Configuration
-    claude_model: str = "claude-sonnet-4-20250514"
+    claude_model: str = "claude-opus-4-20250514"
     claude_model_fast: str = "claude-sonnet-4-20250514"
     claude_max_tokens: int = 4096
 

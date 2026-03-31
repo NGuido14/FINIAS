@@ -17,16 +17,21 @@ logger = logging.getLogger("finias.agent.macro_strategist.ingestion")
 
 # Symbols needed by the Macro Strategist
 REQUIRED_SYMBOLS = [
-    # Index ETFs
-    "SPY", "QQQ", "IWM", "DIA",
-    # Bond & Credit
-    "TLT", "SHY", "HYG", "LQD",
-    # Commodities
-    "GLD", "SLV", "USO", "CPER",
-    # Sector ETFs
+    # Broad Market — used by volatility, breadth, cross-asset, correlation
+    "SPY",   # S&P 500 — primary equity benchmark
+    "IWM",   # Russell 2000 — risk appetite (IWM/SPY ratio)
+    "RSP",   # Equal-weight S&P 500 — breadth (SPY/RSP divergence)
+    # Fixed Income — used by cross-asset, correlation
+    "TLT",   # 20+ Year Treasury — stock-bond correlation, risk parity stress
+    # Credit — used by cross-asset, correlation
+    "HYG",   # High Yield Corporate Bond — credit-equity divergence
+    # Commodities — used by cross-asset, correlation
+    "GLD",   # Gold — gold-equity, gold-bond, dollar-gold correlations
+    "CPER",  # Copper — copper/gold ratio (growth proxy)
+    # International — used by cross-asset
+    "EEM",   # Emerging Markets — EM stress detection
+    # Sector ETFs (11) — used by breadth, volatility sector correlation
     "XLF", "XLK", "XLE", "XLV", "XLI", "XLP", "XLU", "XLC", "XLY", "XLRE", "XLB",
-    # Breadth & International
-    "RSP", "EEM",
 ]
 
 REQUIRED_FRED_SERIES = list(MACRO_SERIES.keys())
