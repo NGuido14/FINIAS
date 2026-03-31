@@ -257,6 +257,7 @@ async def main():
                     iwm_prices=polygon_as_of.get("IWM"),
                     hyg_prices=polygon_as_of.get("HYG"),
                     eem_prices=polygon_as_of.get("EEM"),
+                    vix_series=fred_as_of.get("VIXCLS", []),
                 )
 
                 # 8. Regime Detection

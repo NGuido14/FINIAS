@@ -74,6 +74,9 @@ class CrossAssetAnalysis:
     # Composite
     cross_asset_score: float = 0.0            # -1 to 1 — positive = risk-on
 
+    # Correlation matrix (rolling correlations, betas, convexity)
+    correlation_matrix: Optional[dict] = None  # CorrelationMatrix.to_dict() output
+
     def to_dict(self) -> dict:
         return {
             "dollar": {
@@ -124,6 +127,7 @@ class CrossAssetAnalysis:
                 "stress": self.em_stress,
             },
             "cross_asset_score": self.cross_asset_score,
+            "correlations": self.correlation_matrix,
         }
 
 
@@ -141,6 +145,7 @@ def analyze_cross_assets(
     iwm_prices: list[dict] = None,       # IWM for risk appetite
     hyg_prices: list[dict] = None,       # HYG for credit-equity divergence
     eem_prices: list[dict] = None,       # EEM for EM stress
+    vix_series: list[dict] = None,       # VIXCLS for correlation regime splits
 ) -> CrossAssetAnalysis:
     """Analyze cross-asset signals with full intermarket analysis."""
 
@@ -188,6 +193,28 @@ def analyze_cross_assets(
 
     # === Composite Score ===
     result.cross_asset_score = _compute_cross_asset_score(result)
+
+    # === Correlation Matrix (rolling correlations, betas, convexity) ===
+    try:
+        from finias.agents.macro_strategist.computations.correlation import compute_correlation_matrix
+        from datetime import date as _date
+        corr_matrix = compute_correlation_matrix(
+            spy=spy_prices,
+            tlt=tlt_prices,
+            gld=gold_prices,
+            hyg=hyg_prices,
+            oil=oil_series,
+            dxy=dxy_series,
+            vix=vix_series,
+            as_of_date=str(_date.today()),
+        )
+        result.correlation_matrix = corr_matrix.to_dict()
+    except Exception as e:
+        import logging
+        logging.getLogger("finias.agent.macro_strategist").warning(
+            f"Correlation matrix computation failed: {e}"
+        )
+        result.correlation_matrix = None
 
     return result
 

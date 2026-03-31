@@ -534,6 +534,7 @@ async def check_computations(cache: MarketDataCache):
             iwm_prices=add_syms.get("IWM"),
             hyg_prices=add_syms.get("HYG"),
             eem_prices=add_syms.get("EEM"),
+            vix_series=await cache.get_fred_series("VIXCLS", from_date=from_date),
         )
         ok(f"Cross-Asset: score={ca_test.cross_asset_score:.3f}, "
            f"cu/au_signal={ca_test.copper_gold_signal}, "
@@ -546,6 +547,20 @@ async def check_computations(cache: MarketDataCache):
             warn(f"  CREDIT-EQUITY DIVERGENCE: {ca_test.divergence_type}")
         if ca_test.em_stress:
             warn(f"  EM STRESS: relative perf {ca_test.em_relative_performance_20d:.1f}%")
+        # Correlation matrix diagnostics
+        if ca_test.correlation_matrix:
+            corr = ca_test.correlation_matrix
+            agg = corr.get("aggregate", {})
+            ok(f"  Correlation Matrix: diversification={agg.get('diversification_regime')}, "
+               f"avg|corr|={agg.get('avg_absolute_correlation', 0):.3f}, "
+               f"stress_couplings={agg.get('stress_coupling_count', 0)}, "
+               f"breakdowns={agg.get('breakdown_count', 0)}")
+            for pair_name, pair_data in corr.get("pairs", {}).items():
+                rc = pair_data.get("rolling_correlations", {})
+                ok(f"    {pair_name}: corr_60d={rc.get('corr_60d', 'N/A')}, "
+                   f"regime={pair_data.get('regime_label', 'unknown')}")
+        else:
+            warn("  Correlation Matrix: not computed")
     except Exception as e:
         fail(f"Cross-Asset: {e}")
         import traceback
@@ -594,6 +609,7 @@ async def check_computations(cache: MarketDataCache):
                 iwm_prices=diag_syms.get("IWM"),
                 hyg_prices=diag_syms.get("HYG"),
                 eem_prices=diag_syms.get("EEM"),
+                vix_series=await cache.get_fred_series("VIXCLS", from_date=from_date),
             )
 
             regime = detect_regime(

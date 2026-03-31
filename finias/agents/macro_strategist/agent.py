@@ -46,6 +46,78 @@ from finias.agents.macro_strategist.prompts.interpretation import MACRO_INTERPRE
 logger = logging.getLogger("finias.agent.macro_strategist")
 
 
+def _generate_correlation_notes_from_dict(corr_dict: dict) -> list[str]:
+    """
+    Generate plain-English correlation data notes from the stored dict.
+    This avoids reconstructing full dataclass objects — works directly
+    from the to_dict() output that's already in the regime JSON.
+    """
+    notes = []
+    pairs = corr_dict.get("pairs", {})
+    if not pairs:
+        return notes
+
+    notes.append(
+        "- CROSS-ASSET CORRELATIONS (COMPUTED — use these exact numbers, "
+        "do NOT invent correlation values or thresholds):"
+    )
+
+    for pair_name, pair_data in pairs.items():
+        rolling = pair_data.get("rolling_correlations", {})
+        beta = pair_data.get("beta", {})
+        vol_cond = pair_data.get("vol_regime_conditional", {})
+        convex = pair_data.get("convexity", {})
+        assets = pair_data.get("assets", {})
+        regime = pair_data.get("regime_label", "normal")
+
+        parts = [f"    {assets.get('a', '?')} vs {assets.get('b', '?')}:"]
+
+        c60 = rolling.get("corr_60d")
+        if c60 is not None:
+            parts.append(f"60d corr = {c60:.3f}")
+
+        pctl = rolling.get("percentile_vs_1y")
+        if pctl is not None:
+            parts.append(f"({pctl:.0f}th pctl vs 1Y)")
+
+        b60 = beta.get("beta_60d")
+        if b60 is not None:
+            parts.append(f"beta = {b60:.3f}")
+
+        spread = vol_cond.get("spread")
+        if spread is not None:
+            if spread > 0.15:
+                parts.append("STRENGTHENS in stress")
+            elif spread < -0.15:
+                parts.append("WEAKENS in stress")
+
+        cscore = convex.get("score")
+        if cscore is not None:
+            if cscore > 0.05:
+                parts.append("convex (amplifies at extremes)")
+            elif cscore < -0.05:
+                parts.append("concave (dampens at extremes)")
+
+        if regime and regime != "normal":
+            parts.append(f"REGIME: {regime}")
+
+        notes.append(", ".join(parts))
+
+    # Aggregate
+    agg = corr_dict.get("aggregate", {})
+    div_regime = agg.get("diversification_regime")
+    avg_corr = agg.get("avg_absolute_correlation")
+    stress_count = agg.get("stress_coupling_count", 0)
+    breakdown_count = agg.get("breakdown_count", 0)
+    if div_regime:
+        notes.append(
+            f"    Diversification: {div_regime} (avg |corr| = {avg_corr:.2f}). "
+            f"Stress couplings: {stress_count}. Breakdowns: {breakdown_count}."
+        )
+
+    return notes
+
+
 class MacroStrategist(BaseAgent):
     """
     The Macro Strategist — understands the big picture.
@@ -251,6 +323,7 @@ class MacroStrategist(BaseAgent):
             iwm_prices=additional_symbols.get("IWM"),
             hyg_prices=additional_symbols.get("HYG"),
             eem_prices=additional_symbols.get("EEM"),
+            vix_series=fred_data.get("VIXCLS", []),
         )
 
         # 5. Monetary Policy (NEW)
@@ -831,6 +904,51 @@ class MacroStrategist(BaseAgent):
                 f"Conditions are changing faster than normal — monitor closely."
             )
 
+            # --- Velocity-Aware Staleness Warning ---
+            # In high-velocity environments, fast-moving metrics can become materially
+            # stale within days. Tell Claude which specific values to verify via web search.
+            stale_metrics = []
+
+            if velocity.get("vix") in ("spiking", "rising_fast"):
+                vix_val = regime_dict.get("components", {}).get("volatility", {}).get("vix", {}).get("level")
+                if vix_val is not None:
+                    stale_metrics.append(f"VIX (computed: {vix_val})")
+                else:
+                    stale_metrics.append("VIX (computed value unavailable)")
+
+            if velocity.get("credit_spreads") in ("rapid_widening", "widening"):
+                hy_val = ca.get("credit", {}).get("hy_spread")
+                if hy_val is not None:
+                    stale_metrics.append(f"HY spread (computed: {hy_val}%)")
+                else:
+                    stale_metrics.append("HY spread (computed value unavailable)")
+
+            if velocity.get("dollar") in ("surging", "strengthening"):
+                dxy_val = ca.get("dollar", {}).get("dxy")
+                if dxy_val is not None:
+                    stale_metrics.append(f"Dollar/DXY (computed: {dxy_val})")
+                else:
+                    stale_metrics.append("Dollar/DXY (computed value unavailable)")
+
+            # Always include oil and SPY in high-velocity environments
+            oil_val = ca.get("oil", {}).get("price")
+            if oil_val is not None:
+                stale_metrics.append(
+                    f"Oil/WTI (computed: ${oil_val:.2f} — NOTE: this is WTI, not Brent; "
+                    f"in geopolitical supply disruptions Brent can trade $10-30 above WTI)"
+                )
+            else:
+                stale_metrics.append("Oil/WTI (computed value unavailable)")
+
+            stale_metrics.append("SPY level")
+
+            notes.append(
+                f"- STALE DATA WARNING — High velocity environment means computed values may be "
+                f"materially outdated. USE WEB SEARCH to verify current levels before referencing "
+                f"these in your analysis: {', '.join(stale_metrics)}. "
+                f"Cite the web-searched values alongside computed values when they differ materially."
+            )
+
         # --- Scenario Triggers ---
         triggers = traj.get("scenario_triggers", [])
         critical_triggers = [t for t in triggers if t.get("severity") == "critical" and t.get("distance", 999) < 5]
@@ -840,6 +958,12 @@ class MacroStrategist(BaseAgent):
                     f"- CRITICAL TRIGGER NEARBY: {t['metric']} at {t['current']}, threshold {t['threshold']} "
                     f"(distance: {t['distance']}). If breached: {t['consequence']}."
                 )
+
+        # --- Cross-Asset Correlations ---
+        corr_data = ca.get("correlations")
+        if corr_data and corr_data.get("pairs"):
+            corr_notes = _generate_correlation_notes_from_dict(corr_data)
+            notes.extend(corr_notes)
 
         if not notes:
             return ""
