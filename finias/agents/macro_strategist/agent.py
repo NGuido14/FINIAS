@@ -406,8 +406,10 @@ class MacroStrategist(BaseAgent):
         interpretation = await self._interpret(regime_assessment, query.question)
 
         # === Publish to shared state (Redis) ===
-        await self.state.set_regime(regime_assessment.to_dict())
-        await self.state.publish_opinion(self.name, regime_assessment.to_dict())
+        regime_dict = regime_assessment.to_dict()
+        regime_dict["interpretation"] = interpretation  # Claude's full analysis + web search context
+        await self.state.set_regime(regime_dict)
+        await self.state.publish_opinion(self.name, regime_dict)
 
         # === Persist to database (PostgreSQL) ===
         try:
@@ -909,7 +911,8 @@ class MacroStrategist(BaseAgent):
                 composite_score, confidence, stress_index, binding_constraint,
                 vix_level, fed_funds_rate, net_liquidity_trillion, spread_2s10s,
                 core_pce_yoy, unemployment_rate, sahm_value, ism_manufacturing,
-                hy_spread, nfci
+                hy_spread, nfci,
+                full_regime_json, interpretation_json
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9,
@@ -917,7 +920,8 @@ class MacroStrategist(BaseAgent):
                 $14, $15, $16, $17,
                 $18, $19, $20, $21,
                 $22, $23, $24, $25,
-                $26, $27
+                $26, $27,
+                $28, $29
             )
             """,
             regime.primary_regime.value, regime.cycle_phase,
@@ -933,6 +937,8 @@ class MacroStrategist(BaseAgent):
             key_levels.get("core_pce_yoy"), key_levels.get("unemployment"),
             key_levels.get("sahm_value"), key_levels.get("ism_manufacturing"),
             key_levels.get("hy_spread"), key_levels.get("nfci"),
+            json.dumps(regime.to_dict(), default=str),  # full_regime_json — ALL 200+ fields
+            json.dumps(interpretation, default=str),     # interpretation_json — Claude's full analysis
         )
 
         # Store in agent_opinions
