@@ -138,44 +138,56 @@ def _extract_interpretation_json(text: str) -> dict:
     Extract the interpretation JSON from Claude's response text.
 
     Claude's response may contain web search content with embedded JSON
-    (JSON-LD, API responses, etc.). This function looks for a JSON block
-    containing the expected interpretation keys rather than naively taking
-    the outermost {}.
+    (JSON-LD, API responses, stray { } in HTML/JS). The balanced-brace
+    scanner breaks when web-search text has unmatched braces.
 
-    Falls back to the outermost {} approach if targeted extraction fails.
+    This version uses KEY-TARGETED EXTRACTION: search for a key that only
+    appears in our interpretation schema (e.g. "macro_regime"), walk
+    backwards to the nearest '{', then try json.loads on progressively
+    larger substrings ending at later '}' characters.
     """
-    # Strategy 1: Find JSON blocks and look for one with expected keys
-    expected_keys = {"summary", "key_findings", "risks", "watch_items"}
+    # Markers unique to the interpretation JSON (not in typical web content)
+    markers = ['"macro_regime"', '"key_findings"', '"summary"']
 
-    # Try to find JSON blocks by matching balanced braces
-    depth = 0
-    start_positions = []
-    for i, ch in enumerate(text):
-        if ch == '{':
-            if depth == 0:
-                start_positions.append(i)
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0 and start_positions:
-                candidate = text[start_positions[-1]:i+1]
-                try:
-                    parsed = json.loads(candidate)
-                    if isinstance(parsed, dict) and expected_keys.intersection(parsed.keys()):
-                        return parsed
-                except json.JSONDecodeError:
-                    continue
+    for marker in markers:
+        idx = text.find(marker)
+        if idx == -1:
+            continue
 
-    # Strategy 2: Fallback to outermost {} (original approach)
-    json_start = text.find("{")
-    json_end = text.rfind("}") + 1
-    if json_start >= 0 and json_end > json_start:
+        # Walk backwards from the marker to find the opening brace
+        open_brace = text.rfind("{", 0, idx)
+        if open_brace == -1:
+            continue
+
+        # Try closing braces from the END of text backwards
+        # (the interpretation JSON is usually the last/largest block)
+        search_from = idx
+        while True:
+            close_brace = text.rfind("}", search_from)
+            if close_brace == -1 or close_brace <= open_brace:
+                break
+            candidate = text[open_brace:close_brace + 1]
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict) and {"summary", "key_findings"}.intersection(parsed.keys()):
+                    return parsed
+            except json.JSONDecodeError:
+                # Try a smaller substring (earlier closing brace)
+                search_from = close_brace - 1
+                if search_from <= open_brace:
+                    break
+                continue
+
+    # Fallback: try the raw text as-is (no web search prefix)
+    text_stripped = text.strip()
+    if text_stripped.startswith("{"):
         try:
-            return json.loads(text[json_start:json_end])
+            parsed = json.loads(text_stripped)
+            if isinstance(parsed, dict) and "summary" in parsed:
+                return parsed
         except json.JSONDecodeError:
             pass
 
-    # Strategy 3: Return empty dict (caller handles defaults)
     return {}
 
 
@@ -774,22 +786,29 @@ class MacroStrategist(BaseAgent):
                 "key_metrics": {},
             }
 
-            # Secondary attempt: the raw text itself might be valid JSON
-            # (happens when web search content confuses the primary parser)
-            try:
-                text_stripped = text.strip()
-                if text_stripped.startswith("{"):
-                    parsed = json.loads(text_stripped)
-                    if isinstance(parsed, dict) and "summary" in parsed:
-                        result = parsed
-                        result.setdefault("key_findings", [])
-                        result.setdefault("risks", [])
-                        result.setdefault("watch_items", [])
-                        result.setdefault("macro_regime", "")
-                        result.setdefault("binding_constraint", "")
-                        result.setdefault("key_metrics", {})
-            except (json.JSONDecodeError, ValueError):
-                pass  # Keep the fallback result
+            # Secondary attempt: search for a key marker and try parsing from there
+            for _marker in ['"macro_regime"', '"summary"']:
+                _midx = text.find(_marker)
+                if _midx == -1:
+                    continue
+                _open = text.rfind("{", 0, _midx)
+                if _open == -1:
+                    continue
+                _close = text.rfind("}")
+                if _close > _open:
+                    try:
+                        parsed = json.loads(text[_open:_close + 1])
+                        if isinstance(parsed, dict) and "summary" in parsed:
+                            result = parsed
+                            result.setdefault("key_findings", [])
+                            result.setdefault("risks", [])
+                            result.setdefault("watch_items", [])
+                            result.setdefault("macro_regime", "")
+                            result.setdefault("binding_constraint", "")
+                            result.setdefault("key_metrics", {})
+                            break
+                    except (json.JSONDecodeError, ValueError):
+                        continue
 
         return result
 
