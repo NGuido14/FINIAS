@@ -276,6 +276,13 @@ async def check_matrix(db: DatabasePool):
 async def check_computations(cache: MarketDataCache):
     header("5. COMPUTATION MODULES (pure Python, no Claude API)")
 
+    # Force matrix repopulation to ensure computed values are current
+    try:
+        repop_count = await cache.populate_macro_matrix()
+        ok(f"Matrix repopulated: {repop_count} dates refreshed")
+    except Exception as e:
+        warn(f"Matrix repopulation failed: {e}")
+
     from_date = date.today() - timedelta(days=730)
     to_date = date.today()
 
@@ -629,10 +636,33 @@ async def check_computations(cache: MarketDataCache):
             # Get DFEDTARU for rate history
             dfedtaru = await cache.get_fred_series("DFEDTARU", from_date=from_date)
 
+            # Fetch most recent stored regime for trajectory comparison
+            prior_regime = None
+            try:
+                prior_row = await cache.db.fetchrow(
+                    """
+                    SELECT inflation_score, stress_index, binding_constraint
+                    FROM regime_assessments
+                    ORDER BY id DESC LIMIT 1
+                    """
+                )
+                if prior_row:
+                    class _PriorRegime:
+                        pass
+                    prior_regime = _PriorRegime()
+                    prior_regime.inflation_score = float(prior_row["inflation_score"]) if prior_row["inflation_score"] else 0.0
+                    prior_regime.stress_index = float(prior_row["stress_index"]) if prior_row["stress_index"] else 0.0
+                    prior_regime.binding_constraint = prior_row["binding_constraint"] or "none"
+                    ok(f"  (Using prior regime from regime_assessments for trajectory comparison)")
+                else:
+                    ok(f"  (No prior regime found — trajectory signals will show defaults)")
+            except Exception as e:
+                logger.warning(f"Could not fetch prior regime: {e}")
+
             traj = compute_trajectory(
                 regime_assessment=regime,
                 fed_target_upper=dfedtaru,
-                prior_regime_assessment=None,  # No prior in diagnostics
+                prior_regime_assessment=prior_regime,
             )
             ok(f"  TRAJECTORY ASSESSMENT:")
             ok(f"    Rate history: {traj.policy_trajectory} ({traj.cumulative_rate_change_12m_bp:+.0f}bp in 12m, "
@@ -683,7 +713,7 @@ async def table_usage_summary(db: DatabasePool):
         "agent_opinions": "KEEP — Audit trail for all agent outputs",
         "schema_migrations": "KEEP — Migration tracking",
         "agent_health_log": "KEEP — Health monitoring",
-        "regime_assessments": "EVALUATE — Not populated by agent code currently",
+        "regime_assessments": "KEEP — Historical regime classifications for trajectory comparison",
     }
 
     for table, recommendation in tables.items():

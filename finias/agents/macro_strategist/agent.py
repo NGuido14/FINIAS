@@ -143,6 +143,11 @@ class MacroStrategist(BaseAgent):
                 logger.warning(f"Failed to fetch FRED series {series_id}: {e}")
                 fred_data[series_id] = []
 
+        # Track missing FRED series for data quality reporting
+        missing_fred = [sid for sid, data in fred_data.items() if not data]
+        if missing_fred:
+            logger.warning(f"Missing FRED series ({len(missing_fred)}): {', '.join(missing_fred[:10])}")
+
         # Populate the macro matrix from raw economic_indicators
         try:
             matrix_count = await self.cache.populate_macro_matrix()
@@ -180,6 +185,20 @@ class MacroStrategist(BaseAgent):
             except Exception as e:
                 logger.warning(f"Failed to fetch {symbol}: {e}")
                 additional_symbols[symbol] = None
+
+        # Track missing Polygon symbols for data quality reporting
+        missing_polygon = []
+        if not spx_bars:
+            missing_polygon.append("SPY")
+        for symbol, data in additional_symbols.items():
+            if not data:
+                missing_polygon.append(symbol)
+        for etf in sector_etfs:
+            if etf not in sector_prices or not sector_prices[etf]:
+                missing_polygon.append(etf)
+
+        if missing_polygon:
+            logger.warning(f"Missing Polygon symbols ({len(missing_polygon)}): {', '.join(missing_polygon)}")
 
         # === Run ALL computation modules ===
 
@@ -345,6 +364,14 @@ class MacroStrategist(BaseAgent):
             historical_category_scores=historical_scores,
         )
 
+        # Attach data gaps to regime assessment for data notes
+        regime_assessment._data_gaps = {
+            "fred_missing": missing_fred,
+            "polygon_missing": missing_polygon,
+            "fred_available": len(fred_series_needed) - len(missing_fred),
+            "polygon_available": len(sector_etfs) + len(additional_symbols) + 1 - len(missing_polygon),
+        }
+
         # === Compute Trajectory Layer ===
         # Get prior assessment for trajectory change signals
         prior_regime = None
@@ -456,6 +483,12 @@ class MacroStrategist(BaseAgent):
 
         This is the 10% of the work that requires genuine intelligence.
         The Python did all the math. Claude explains what it means.
+
+        Claude has access to web search to:
+        - Research WHY indicators are moving (e.g., oil up 36% → Iran conflict)
+        - Verify stale data (e.g., check current GDPNow from Atlanta Fed)
+        - Get current market narrative and geopolitical context
+        - Cross-check any data point that seems outdated
         """
         settings = get_settings()
 
@@ -472,16 +505,35 @@ class MacroStrategist(BaseAgent):
 
         response = await self._client.messages.create(
             model=settings.claude_model,
-            max_tokens=2000,
+            max_tokens=3000,
+            tools=[{
+                "type": "web_search_20250305",
+                "name": "web_search",
+            }],
             messages=[{"role": "user", "content": prompt}],
         )
 
-        # Parse Claude's response
-        text = response.content[0].text
+        # Extract text from potentially multi-block response
+        # When Claude uses web search, response contains tool_use and tool_result
+        # blocks alongside text blocks. We need all text blocks.
+        text_parts = []
+        for block in response.content:
+            if hasattr(block, "text"):
+                text_parts.append(block.text)
+        text = "\n".join(text_parts)
 
         # Claude returns JSON with macro_regime, binding_constraint, summary, key_findings, risks, watch_items
         try:
-            result = json.loads(text)
+            # Try to find JSON in the response (may be surrounded by web search results)
+            # Look for the outermost { } pair
+            json_start = text.find("{")
+            json_end = text.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                json_text = text[json_start:json_end]
+                result = json.loads(json_text)
+            else:
+                raise json.JSONDecodeError("No JSON found", text, 0)
+
             # Ensure all expected keys exist
             result.setdefault("summary", "")
             result.setdefault("key_findings", [])
@@ -606,6 +658,63 @@ class MacroStrategist(BaseAgent):
                 notes.append(
                     f"- SPY/RSP: Equal-weight outperforming cap-weighted over 20 days "
                     f"(ratio change: {rsp_change:.4f}). Broad breadth improving."
+                )
+
+        # --- GDPNow Staleness Check ---
+        bc = regime_dict.get("components", {}).get("business_cycle", {})
+        gdpnow_data = bc.get("gdp_nowcast", {})
+        gdpnow_val = gdpnow_data.get("value") if isinstance(gdpnow_data, dict) else gdpnow_data
+        if gdpnow_val is not None:
+            # GDPNow on FRED is quarterly — it shows the FINAL estimate for the prior quarter,
+            # NOT the current quarter's real-time nowcast. The Atlanta Fed updates the real
+            # GDPNow multiple times per week, but FRED only captures the quarterly final.
+            notes.append(
+                f"- GDPNow: {gdpnow_val:.1f}% — CRITICAL WARNING: The FRED GDPNow series updates "
+                f"only QUARTERLY (final estimate per quarter). This value is likely the PRIOR "
+                f"quarter's final estimate, NOT the current quarter's real-time nowcast. "
+                f"The actual current-quarter GDPNow from the Atlanta Fed may be significantly "
+                f"different. USE WEB SEARCH to find 'Atlanta Fed GDPNow current estimate' for "
+                f"the real-time value. Do NOT present this FRED value as the current growth estimate "
+                f"without verifying via web search."
+            )
+
+        # --- Recession Probability Disclaimer ---
+        recession_prob = regime_dict.get("key_levels", {}).get("recession_prob", 0)
+        if recession_prob is not None and recession_prob > 0:
+            notes.append(
+                f"- Recession Probability: {recession_prob*100:.0f}% — This is a HEURISTIC estimate "
+                f"based on weighted combination of Sahm Rule, yield curve, claims, and cycle phase. "
+                f"It is NOT a calibrated statistical probability from a trained model. A future "
+                f"logistic regression model will replace this. For now, treat as directional guidance "
+                f"(low/moderate/elevated risk) rather than a precise percentage."
+            )
+
+        # --- Regime Classification Context ---
+        primary = regime_dict.get("regime", {})
+        regime_label = primary.get("primary", "unknown") if isinstance(primary, dict) else str(primary)
+        if regime_label == "transition":
+            notes.append(
+                f"- Regime: 'transition' is the BASELINE state — the system classified 96% of "
+                f"196 backtest observations as 'transition'. Do NOT interpret this as uncertain "
+                f"or temporary. It is the normal state. Use the forward_bias field "
+                f"(constructive/neutral/cautious) for directional assessment, not the regime label."
+            )
+
+        # --- Data Gaps Warning ---
+        # This is populated by the query() method if any FRED series or Polygon symbols are missing
+        data_gaps = getattr(regime, '_data_gaps', None)
+        if data_gaps:
+            missing_fred = data_gaps.get("fred_missing", [])
+            missing_polygon = data_gaps.get("polygon_missing", [])
+            if missing_fred or missing_polygon:
+                gap_parts = []
+                if missing_fred:
+                    gap_parts.append(f"{len(missing_fred)} FRED series ({', '.join(missing_fred[:5])}{'...' if len(missing_fred) > 5 else ''})")
+                if missing_polygon:
+                    gap_parts.append(f"{len(missing_polygon)} Polygon symbols ({', '.join(missing_polygon[:5])})")
+                notes.append(
+                    f"- DATA GAPS: Missing {'; '.join(gap_parts)}. "
+                    f"Assessment may be incomplete for affected domains. Reduce confidence accordingly."
                 )
 
         # --- Trajectory: Rate Decision History ---

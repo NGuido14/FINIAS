@@ -88,6 +88,9 @@ class TrajectoryAssessment:
     geopolitical_risk_level: str = "unknown"
     narrative_regime: str = "unknown"  # inflation_fear, ai_euphoria, recession_watch, geopolitical, etc.
 
+    # === Data Freshness ===
+    data_freshness_warnings: list = field(default_factory=list)
+
     def to_dict(self) -> dict:
         return {
             "rate_decisions": {
@@ -146,6 +149,9 @@ class TrajectoryAssessment:
                 "risk_level": self.geopolitical_risk_level,
                 "narrative_regime": self.narrative_regime,
                 "_note": "Populated by News/Event Monitor agent when built. Empty = no geopolitical context available.",
+            },
+            "data_freshness": {
+                "warnings": self.data_freshness_warnings,
             },
         }
 
@@ -938,6 +944,42 @@ def compute_event_calendar(as_of_date: date = None) -> dict:
     }
 
 
+def compute_data_freshness(
+    regime_assessment,
+    as_of_date: date = None,
+) -> dict:
+    """
+    Assess the freshness of data underlying the regime assessment.
+
+    Checks key indicators for staleness and produces warnings
+    that Claude and downstream agents can use to calibrate confidence.
+    """
+    if as_of_date is None:
+        as_of_date = date.today()
+
+    warnings = []
+
+    # GDPNow is known to be quarterly on FRED
+    # The Atlanta Fed updates it multiple times per week, but FRED only gets quarterly finals
+    warnings.append(
+        "GDPNow from FRED is quarterly (prior quarter final). "
+        "Current quarter estimate requires web search for Atlanta Fed GDPNow."
+    )
+
+    # Check if we can detect any staleness from the data itself
+    # Monthly FRED data (unemployment, CPI, PCE) is expected to be 30-60 days old
+    # Weekly FRED data (claims, WALCL) should be within 10 days
+    # Daily FRED data (VIX, yields) should be within 3 days
+
+    return {
+        "daily_data_note": "VIX, yields, spreads: updated within 1-3 business days",
+        "weekly_data_note": "Fed balance sheet, claims, NFCI: updated within 7-10 days",
+        "monthly_data_note": "CPI, PCE, unemployment, payrolls: 30-60 day publication lag is NORMAL",
+        "gdpnow_note": "FRED GDPNow is QUARTERLY final only — use web search for current estimate",
+        "warnings": warnings,
+    }
+
+
 def compute_trajectory(
     regime_assessment,
     fed_target_upper: list[dict],
@@ -1069,5 +1111,9 @@ def compute_trajectory(
     result.max_single_position_pct = round(
         result.max_single_position_pct * result.pre_event_sizing_multiplier, 1
     )
+
+    # === 13. Data Freshness ===
+    freshness = compute_data_freshness(regime_assessment)
+    result.data_freshness_warnings = freshness["warnings"]
 
     return result

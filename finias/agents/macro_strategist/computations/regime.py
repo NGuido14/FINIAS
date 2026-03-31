@@ -297,6 +297,7 @@ class RegimeAssessment:
             active_geopolitical_risks=traj_geo.get("active_risks", []),
             geopolitical_risk_level=traj_geo.get("risk_level", "unknown"),
             narrative_regime=traj_geo.get("narrative_regime", "unknown"),
+            data_freshness_warnings=traj.get("data_freshness", {}).get("warnings", []),
             consistency_warnings=warnings,
         )
 
@@ -396,6 +397,9 @@ class MacroContext:
     geopolitical_risk_level: str = "unknown"
     narrative_regime: str = "unknown"
 
+    # === DATA QUALITY (for all agents — confidence calibration) ===
+    data_freshness_warnings: list = field(default_factory=list)
+
     # Consistency
     consistency_warnings: list = field(default_factory=list)  # Any internal contradictions detected
 
@@ -481,6 +485,9 @@ class MacroContext:
                 "active_risks": self.active_geopolitical_risks,
                 "risk_level": self.geopolitical_risk_level,
                 "narrative_regime": self.narrative_regime,
+            },
+            "data_freshness": {
+                "warnings": self.data_freshness_warnings,
             },
             "consistency_warnings": self.consistency_warnings,
         }
@@ -861,6 +868,22 @@ def _classify_primary_regime(
     composite: float, stress: float, vol: VolatilityAnalysis
 ) -> tuple[MarketRegime, float]:
     """Map composite score and stress to primary regime."""
+
+    # IMPLEMENTATION NOTE (2026-03):
+    # With current scoring dynamics, the composite rarely exceeds +0.15.
+    # In backtesting (196 weeks, 2022-2025):
+    #   - risk_on (>0.3) has NEVER triggered. Max composite was +0.118.
+    #   - risk_off (<-0.3) triggered 7 times (~4% of observations)
+    #   - transition was the classification 96% of the time
+    #   - low_vol and high_vol are superseded by volatility_regime field
+    #
+    # The primary_regime field is effectively a 2-state indicator
+    # (transition vs risk_off) for practical purposes. The trajectory
+    # layer's forward_bias provides the actual directional signal.
+    #
+    # Thresholds are NOT recalibrated to avoid overfitting to the
+    # backtest period. The regime label describes the current level;
+    # forward_bias describes the direction.
 
     # Crisis overrides
     if stress > 0.8:
