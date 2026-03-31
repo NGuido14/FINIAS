@@ -47,7 +47,7 @@ class Director(BaseAgent):
         self.registry = registry
         settings = get_settings()
         self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-        self._model = settings.claude_model
+        self._model = settings.claude_model_fast
         self._max_tokens = settings.claude_max_tokens
         self._conversation_history: list[dict[str, Any]] = []
 
