@@ -30,6 +30,8 @@ from finias.core.agents.models import (
 from finias.core.agents.registry import ToolRegistry
 from finias.core.config.settings import get_settings
 from finias.agents.director.prompts.system import DIRECTOR_SYSTEM_PROMPT
+from finias.core.state.redis_state import RedisState
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger("finias.agent.director")
 
@@ -42,9 +44,10 @@ class Director(BaseAgent):
     Claude tool_use, and synthesizes grounded responses.
     """
 
-    def __init__(self, registry: ToolRegistry):
+    def __init__(self, registry: ToolRegistry, state: Optional[RedisState] = None):
         super().__init__()
         self.registry = registry
+        self.state = state
         settings = get_settings()
         self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self._model = settings.claude_model_fast
@@ -72,6 +75,139 @@ class Director(BaseAgent):
             "Explain decisions and reasoning",
         ]
 
+    async def _get_cached_macro_context(self) -> Optional[str]:
+        """
+        Check Redis for a fresh macro regime assessment.
+
+        Returns a formatted context string if cache is fresh (< 12 hours),
+        or None if stale/missing. When a fresh cache is available, the
+        Director can answer macro questions directly without calling the
+        macro agent tool — saving ~$0.30 and 5-15 seconds per query.
+        """
+        if self.state is None:
+            return None
+
+        try:
+            regime = await self.state.get_regime()
+            if not regime:
+                return None
+
+            # Check freshness
+            updated_at = regime.get("_updated_at")
+            if not updated_at:
+                return None
+
+            updated_time = datetime.fromisoformat(updated_at)
+            age = datetime.now(timezone.utc) - updated_time
+            if age > timedelta(hours=12):
+                logger.debug(f"Cached regime is {age.total_seconds()/3600:.1f}h old — stale")
+                return None
+
+            # Build a concise context summary from the cached regime
+            # This is what the Director uses instead of calling the macro agent
+            interp = regime.get("interpretation", {})
+            trajectory = regime.get("trajectory", {})
+            key_levels = regime.get("key_levels", {})
+            regime_info = regime.get("regime", {})
+            category_scores = regime.get("category_scores", {})
+
+            parts = []
+            parts.append(f"CACHED MACRO CONTEXT (updated {age.total_seconds()/60:.0f} minutes ago):")
+            parts.append("")
+
+            # Regime classification
+            parts.append(f"Regime: {regime_info.get('primary', 'unknown')} | "
+                        f"Cycle: {regime_info.get('cycle_phase', 'unknown')} | "
+                        f"Volatility: {regime_info.get('volatility', 'unknown')} | "
+                        f"Inflation: {regime_info.get('inflation', 'unknown')} | "
+                        f"Liquidity: {regime_info.get('liquidity', 'unknown')}")
+
+            # Composite and binding
+            parts.append(f"Composite: {regime.get('composite_score', 0):.3f} | "
+                        f"Stress: {regime.get('stress_index', 0):.3f} | "
+                        f"Confidence: {regime.get('confidence', 0):.2f} | "
+                        f"Binding: {regime.get('binding_constraint', 'unknown')}")
+
+            # Category scores
+            parts.append(f"Scores — Growth: {category_scores.get('growth_cycle', 0):+.3f}, "
+                        f"Monetary: {category_scores.get('monetary_liquidity', 0):+.3f}, "
+                        f"Inflation: {category_scores.get('inflation', 0):+.3f}, "
+                        f"Market: {category_scores.get('market_signals', 0):+.3f}")
+
+            # Key levels
+            kl = key_levels
+            parts.append(f"Key Levels — VIX: {kl.get('vix', 'N/A')}, "
+                        f"Fed Funds: {kl.get('fed_funds', 'N/A')}%, "
+                        f"Core PCE: {kl.get('core_pce_yoy', 'N/A'):.2f}%, "
+                        f"HY Spread: {kl.get('hy_spread', 'N/A')}%, "
+                        f"Sahm: {kl.get('sahm_value', 'N/A')}, "
+                        f"Net Liq: ${kl.get('net_liquidity', 0)/1_000_000:.2f}T")
+
+            # Trajectory
+            forward_bias = trajectory.get("forward_bias", {})
+            sizing = trajectory.get("position_sizing", {})
+            velocity = trajectory.get("velocity", {})
+            events = trajectory.get("event_calendar", {})
+
+            parts.append(f"Forward Bias: {forward_bias.get('bias', 'unknown')} "
+                        f"(score: {forward_bias.get('score', 0):+.3f}, "
+                        f"confidence: {forward_bias.get('confidence', 'unknown')})")
+
+            parts.append(f"Position Sizing — Max: {sizing.get('max_single_position_pct', 'N/A')}%, "
+                        f"Beta: {sizing.get('portfolio_beta_target', 'N/A')}, "
+                        f"Cash: {sizing.get('cash_target_pct', 'N/A')}%, "
+                        f"Reduce Exposure: {sizing.get('reduce_overall_exposure', False)}")
+
+            parts.append(f"Velocity — VIX: {velocity.get('vix', 'unknown')}, "
+                        f"Spreads: {velocity.get('credit_spreads', 'unknown')}, "
+                        f"Breadth: {velocity.get('breadth', 'unknown')}, "
+                        f"Urgency: {velocity.get('urgency', 'unknown')}")
+
+            # Upcoming events
+            upcoming = events.get("upcoming_events", [])
+            if upcoming:
+                event_strs = [f"{e['event']} in {e['days_away']}d" for e in upcoming[:3]]
+                parts.append(f"Events: {', '.join(event_strs)} | "
+                            f"Sizing multiplier: {events.get('pre_event_sizing_multiplier', 1.0)}x")
+
+            # Scenario triggers (closest ones)
+            triggers = trajectory.get("scenario_triggers", [])
+            close_triggers = sorted(
+                [t for t in triggers if isinstance(t.get("distance"), (int, float))],
+                key=lambda t: abs(t["distance"])
+            )[:3]
+            if close_triggers:
+                trig_strs = [f"{t['id']}: {t['current']} → {t['threshold']} (dist: {t['distance']:.2f})"
+                            for t in close_triggers]
+                parts.append(f"Nearest Triggers: {'; '.join(trig_strs)}")
+
+            # Interpretation summary and key findings
+            if interp.get("summary"):
+                parts.append(f"\nInterpretation Summary: {interp['summary']}")
+            if interp.get("key_findings"):
+                parts.append("Key Findings:")
+                for i, finding in enumerate(interp["key_findings"], 1):
+                    parts.append(f"  {i}. {finding}")
+            if interp.get("risks"):
+                parts.append("Risks:")
+                for risk in interp["risks"]:
+                    parts.append(f"  - {risk}")
+            if interp.get("watch_items"):
+                parts.append("Watch Items:")
+                for item in interp["watch_items"]:
+                    parts.append(f"  - {item}")
+
+            # Key metrics
+            metrics = interp.get("key_metrics", {})
+            if metrics:
+                parts.append(f"\nKey Metrics: {json.dumps(metrics)}")
+
+            return "\n".join(parts)
+
+        except Exception as e:
+            logger.warning(f"Failed to load cached macro context: {e}")
+            return None
+
     async def chat(self, user_message: str) -> str:
         """
         Process a user message and return a response.
@@ -91,6 +227,19 @@ class Director(BaseAgent):
         # Prepend today's date so Claude uses correct timeframes
         from datetime import date as _date
         dated_system_prompt = f"TODAY'S DATE: {_date.today().isoformat()}. All dates and timeframes in your response must be relative to today. Do not reference 2024 or 2025 as future dates.\n\n" + DIRECTOR_SYSTEM_PROMPT
+
+        # Check for cached macro context to avoid expensive macro agent calls
+        cached_context = await self._get_cached_macro_context()
+        if cached_context:
+            dated_system_prompt += (
+                "\n\nYou have access to a FRESH cached macro regime assessment below. "
+                "Use this data to answer macro-related questions directly WITHOUT calling "
+                "the macro strategist tool. The data is current and comprehensive. "
+                "Only call the macro strategist tool if the user explicitly asks for a "
+                "fresh/new assessment or if the question requires analysis beyond what's "
+                "in the cached context.\n\n" + cached_context
+            )
+            logger.info("Using cached macro context (skipping macro agent call)")
 
         # Initial Claude call
         from finias.core.utils.retry import retry_claude_call

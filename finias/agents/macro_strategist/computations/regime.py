@@ -301,6 +301,66 @@ class RegimeAssessment:
             consistency_warnings=warnings,
         )
 
+    def to_director_summary(self) -> dict:
+        """
+        Generate a reduced regime summary for the Director's tool_result.
+
+        The full to_dict() produces 200+ fields including every intermediate
+        computation. The Director only needs the interpretation, key levels,
+        trajectory signals, and regime classification to synthesize a
+        user-facing response.
+
+        This reduces the Director's input tokens by roughly 50%, eliminating
+        rate limit collisions and reducing cost.
+        """
+        traj = self.trajectory or {}
+
+        return {
+            "regime": {
+                "primary": self.primary_regime.value,
+                "cycle_phase": self.cycle_phase,
+                "liquidity": self.liquidity_regime,
+                "volatility": self.volatility_regime,
+                "inflation": self.inflation_regime,
+            },
+            "scores": {
+                "composite": self.composite_score,
+                "growth": self.growth_cycle_score,
+                "monetary": self.monetary_liquidity_score,
+                "inflation": self.inflation_score,
+                "market": self.market_signals_score,
+            },
+            "confidence": self.confidence,
+            "stress_index": self.stress_index,
+            "binding_constraint": self.binding_constraint,
+            "key_levels": self.key_levels,
+            "trajectory": {
+                "forward_bias": traj.get("forward_bias", {}),
+                "position_sizing": traj.get("position_sizing", {}),
+                "velocity": traj.get("velocity", {}),
+                "event_calendar": traj.get("event_calendar", {}),
+                "scenario_triggers": traj.get("scenario_triggers", []),
+                "sector_guidance": traj.get("sector_guidance", {}),
+                "rate_decisions": traj.get("rate_decisions", {}),
+                "inflation_surprise": traj.get("inflation_surprise", {}),
+                "trajectory_signals": traj.get("trajectory_signals", {}),
+            },
+            "cross_asset_summary": {
+                "credit": self.cross_asset.get("credit", {}),
+                "oil": self.cross_asset.get("oil", {}),
+                "dollar": self.cross_asset.get("dollar", {}),
+                "risk_appetite": self.cross_asset.get("risk_appetite", {}),
+                "stock_bond_correlation": self.cross_asset.get("stock_bond_correlation", {}),
+                "correlations_aggregate": self.cross_asset.get("correlations", {}).get("aggregate", {}),
+            },
+            "breadth_summary": {
+                "health": self.breadth.get("breadth_health", "unknown"),
+                "score": self.breadth.get("breadth_score", 0),
+                "participation": self.breadth.get("sector_participation", {}),
+                "rotation": self.breadth.get("sector_rotation", {}),
+            },
+        }
+
 
 @dataclass
 class MacroContext:

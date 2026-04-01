@@ -19,6 +19,7 @@ from finias.data.providers.fred_client import FredClient
 from finias.data.cache.market_cache import MarketDataCache
 from finias.agents.macro_strategist.agent import MacroStrategist
 from finias.agents.director.agent import Director
+from finias.core.agents.models import AgentQuery
 
 
 BANNER = """
@@ -33,6 +34,7 @@ Type your questions in natural language.
 Type 'quit' or 'exit' to end the session.
 Type 'status' to check system health.
 Type 'reset' to clear conversation history.
+Type 'refresh' to run a full macro refresh (caches for fast queries).
 """
 
 
@@ -66,7 +68,7 @@ async def initialize_system():
     macro = MacroStrategist(cache=cache, state=state)
     registry.register(macro)
 
-    director = Director(registry=registry)
+    director = Director(registry=registry, state=state)
 
     print("  → System ready.\n")
 
@@ -157,6 +159,29 @@ async def main():
             if user_input.lower() == "reset":
                 director.reset_conversation()
                 print("Conversation history cleared.\n")
+                continue
+
+            if user_input.lower() == "refresh":
+                print("\nRunning full macro refresh...")
+                try:
+                    macro = components["registry"].get_agent("macro_strategist")
+                    if macro:
+                        from finias.agents.macro_strategist.prompts.refresh import MORNING_REFRESH_PROMPT
+                        refresh_query = AgentQuery(
+                            asking_agent="cli_refresh",
+                            target_agent="macro_strategist",
+                            question=MORNING_REFRESH_PROMPT.format(question=""),
+                            require_fresh_data=True,
+                        )
+                        opinion = await macro.timed_query(refresh_query)
+                        print(f"Refresh complete. Regime: {opinion.regime.value if opinion.regime else 'N/A'}, "
+                              f"Confidence: {opinion.confidence.value}, "
+                              f"Findings: {len(opinion.key_findings)}")
+                        print("Cached context now available for fast queries.\n")
+                    else:
+                        print("Macro agent not available.\n")
+                except Exception as e:
+                    print(f"Refresh failed: {e}\n")
                 continue
 
             # Process through Director

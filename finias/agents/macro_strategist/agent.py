@@ -646,7 +646,7 @@ class MacroStrategist(BaseAgent):
             regime=regime_assessment.primary_regime,
             summary=interpretation["summary"],
             key_findings=interpretation["key_findings"],
-            data_points=regime_assessment.to_dict(),
+            data_points=regime_assessment.to_director_summary(),
             methodology=(
                 "Hierarchical regime model with 4 category scores: "
                 f"Growth/Cycle ({regime_assessment.weight_growth:.0%}), "

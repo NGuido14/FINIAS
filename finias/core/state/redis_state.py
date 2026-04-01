@@ -28,7 +28,7 @@ class RedisState:
     Default TTL: 1 hour for opinions, 5 minutes for health status.
     """
 
-    DEFAULT_OPINION_TTL = 3600       # 1 hour
+    DEFAULT_OPINION_TTL = 50400      # 14 hours — covers full trading day from 6:30 AM refresh
     DEFAULT_HEALTH_TTL = 300         # 5 minutes
     DEFAULT_DATA_TTL = 7200          # 2 hours
 

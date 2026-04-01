@@ -153,11 +153,31 @@ class FredClient:
             params["observation_end"] = observation_end.isoformat()
 
         url = f"{self.BASE_URL}/series/observations"
-        async with session.get(url, params=params) as resp:
-            if resp.status != 200:
-                logger.warning(f"FRED API returned {resp.status} for {series_id}")
-                return []
-            data = await resp.json()
+
+        # Retry once on server errors (500s are common with FRED)
+        max_retries = 1
+        last_status = None
+        data = None
+
+        for attempt in range(max_retries + 1):
+            async with session.get(url, params=params) as resp:
+                last_status = resp.status
+                if resp.status == 200:
+                    data = await resp.json()
+                    break
+                elif resp.status >= 500 and attempt < max_retries:
+                    logger.warning(
+                        f"FRED API returned {resp.status} for {series_id}, "
+                        f"retrying in 2s (attempt {attempt + 1}/{max_retries + 1})"
+                    )
+                    await asyncio.sleep(2)
+                else:
+                    logger.warning(f"FRED API returned {resp.status} for {series_id}")
+                    return []
+
+        if data is None:
+            logger.warning(f"FRED API failed after {max_retries + 1} attempts for {series_id}")
+            return []
 
         observations = []
         for obs in data.get("observations", []):
