@@ -745,11 +745,23 @@ class MacroStrategist(BaseAgent):
             f"dates relative to today.\n\n"
         )
 
+        # Build temporal context from recent regime history
+        historical_context = await self._build_historical_context()
+
+        # Build continuity context from prior interpretation
+        prior_assessment_context = await self._build_prior_assessment_context()
+
         # === STEP 1: Analysis (Opus + web search) ===
         # Claude produces free-text analysis — no JSON requirement
-        analysis_prompt = date_context + data_notes + MACRO_ANALYSIS_PROMPT.format(
-            regime_data=regime_data,
-            question=question,
+        analysis_prompt = (
+            date_context
+            + data_notes
+            + historical_context
+            + prior_assessment_context
+            + MACRO_ANALYSIS_PROMPT.format(
+                regime_data=regime_data,
+                question=question,
+            )
         )
 
         from finias.core.utils.retry import retry_claude_call
@@ -1213,6 +1225,260 @@ class MacroStrategist(BaseAgent):
             + "\n".join(notes)
             + "\n\n"
         )
+
+    async def _build_historical_context(self) -> str:
+        """
+        Build temporal context from recent regime assessments.
+
+        Queries the last 4 assessments and computes per-metric direction
+        and streak count. This gives Claude trend awareness beyond the
+        single-point snapshot — "VIX has dropped from 35 to 25 over the
+        last 2 assessments" vs just "VIX is 25."
+
+        Returns a formatted string to prepend to the interpretation prompt,
+        or empty string if insufficient history.
+        """
+        try:
+            rows = await self.cache.db.fetch(
+                """
+                SELECT id, vix_level, sahm_value, hy_spread, core_pce_yoy,
+                       net_liquidity_trillion, fed_funds_rate, nfci,
+                       composite_score, stress_index, binding_constraint,
+                       primary_regime, assessed_at
+                FROM regime_assessments
+                ORDER BY id DESC LIMIT 5
+                """
+            )
+        except Exception as e:
+            logger.warning(f"Could not fetch historical context: {e}")
+            return ""
+
+        if len(rows) < 2:
+            return ""
+
+        # Rows are newest-first. Reverse for chronological order.
+        rows = list(reversed(rows))
+
+        # Current is the last row, prior assessments are everything before it
+        # But we want to compare the CURRENT computation (not yet stored) against stored history
+        # So we use all fetched rows as the historical sequence
+
+        # Define the metrics to track
+        metrics = {
+            "VIX": {"column": "vix_level", "format": ".1f", "unit": ""},
+            "Sahm Rule": {"column": "sahm_value", "format": ".3f", "unit": ""},
+            "HY Spread": {"column": "hy_spread", "format": ".2f", "unit": "%"},
+            "Core PCE YoY": {"column": "core_pce_yoy", "format": ".2f", "unit": "%"},
+            "Net Liquidity": {"column": "net_liquidity_trillion", "format": ".2f", "unit": "T"},
+            "Composite Score": {"column": "composite_score", "format": ".3f", "unit": ""},
+            "Stress Index": {"column": "stress_index", "format": ".3f", "unit": ""},
+            "NFCI": {"column": "nfci", "format": ".3f", "unit": ""},
+        }
+
+        context_lines = []
+        context_lines.append("HISTORICAL CONTEXT — Recent regime assessment trend (last {} assessments):".format(len(rows)))
+
+        significant_changes = []
+
+        for name, info in metrics.items():
+            col = info["column"]
+            fmt = info["format"]
+            unit = info["unit"]
+
+            # Extract values (skip None)
+            values = []
+            for r in rows:
+                val = r[col]
+                if val is not None:
+                    values.append(float(val))
+
+            if len(values) < 2:
+                continue
+
+            # Compute direction from sequential comparisons
+            changes = []
+            for i in range(1, len(values)):
+                diff = values[i] - values[i-1]
+                if abs(diff) < 0.001:  # Essentially flat
+                    changes.append(0)
+                elif diff > 0:
+                    changes.append(1)
+                else:
+                    changes.append(-1)
+
+            # Compute streak (consecutive same-direction moves from most recent)
+            if not changes:
+                continue
+
+            latest_dir = changes[-1]
+            streak = 0
+            for c in reversed(changes):
+                if c == latest_dir:
+                    streak += 1
+                else:
+                    break
+
+            # Classify direction
+            if latest_dir > 0:
+                direction = "rising"
+            elif latest_dir < 0:
+                direction = "falling"
+            else:
+                direction = "flat"
+
+            # Format the values as a sequence
+            val_strs = [f"{v:{fmt}}{unit}" for v in values]
+            sequence = " → ".join(val_strs)
+
+            # Compute total change from first to last
+            total_change = values[-1] - values[0]
+
+            line = f"  {name}: {sequence} ({direction}, streak: {streak})"
+            context_lines.append(line)
+
+            # Track significant moves for the summary
+            if name == "VIX" and abs(total_change) > 3:
+                significant_changes.append(
+                    f"VIX {'dropped' if total_change < 0 else 'rose'} "
+                    f"{abs(total_change):.1f} points over {len(values)-1} assessments"
+                )
+            elif name == "HY Spread" and abs(total_change) > 0.3:
+                significant_changes.append(
+                    f"HY spread {'tightened' if total_change < 0 else 'widened'} "
+                    f"{abs(total_change):.2f}% over {len(values)-1} assessments"
+                )
+            elif name == "Sahm Rule" and abs(total_change) > 0.03:
+                significant_changes.append(
+                    f"Sahm Rule {'improved' if total_change < 0 else 'deteriorated'} "
+                    f"from {values[0]:.3f} to {values[-1]:.3f}"
+                )
+            elif name == "Stress Index" and abs(total_change) > 0.05:
+                significant_changes.append(
+                    f"Stress {'declined' if total_change < 0 else 'rose'} "
+                    f"from {values[0]:.3f} to {values[-1]:.3f}"
+                )
+
+        # Binding constraint history
+        binding_history = [r["binding_constraint"] for r in rows if r["binding_constraint"]]
+        if binding_history:
+            unique_bindings = []
+            for b in binding_history:
+                if not unique_bindings or unique_bindings[-1] != b:
+                    unique_bindings.append(b)
+
+            if len(unique_bindings) == 1:
+                context_lines.append(f"  Binding constraint: {unique_bindings[0]} (unchanged across all assessments)")
+            else:
+                context_lines.append(f"  Binding constraint sequence: {' → '.join(unique_bindings)}")
+
+        # Regime history
+        regime_history = [r["primary_regime"] for r in rows if r["primary_regime"]]
+        if regime_history:
+            unique_regimes = []
+            for r in regime_history:
+                if not unique_regimes or unique_regimes[-1] != r:
+                    unique_regimes.append(r)
+
+            if len(unique_regimes) == 1:
+                context_lines.append(f"  Regime: {unique_regimes[0]} (stable across all assessments)")
+            else:
+                context_lines.append(f"  Regime sequence: {' → '.join(unique_regimes)}")
+
+        # Summary of significant changes
+        if significant_changes:
+            context_lines.append(f"\n  NOTABLE CHANGES: {'; '.join(significant_changes)}")
+
+        context_lines.append(
+            "\n  Use this trend context to frame your analysis. Note what has CHANGED "
+            "since prior assessments, not just where things stand now."
+        )
+
+        return "\n".join(context_lines) + "\n\n"
+
+    async def _build_prior_assessment_context(self) -> str:
+        """
+        Build continuity context from the prior interpretation.
+
+        Fetches the most recent interpretation_json and extracts
+        watch_items and risks. This gives Claude analytical continuity:
+        "Your last assessment flagged X. Has it materialized or resolved?"
+
+        Only passes watch_items and risks — NOT the full summary or
+        key_findings — to prevent error propagation. If Claude fabricated
+        a binding shift in the prior interpretation, we don't want it
+        echoed forward.
+
+        Returns a formatted string to prepend to the interpretation prompt,
+        or empty string if no prior interpretation exists.
+        """
+        try:
+            row = await self.cache.db.fetchrow(
+                """
+                SELECT interpretation_json, assessed_at
+                FROM regime_assessments
+                ORDER BY id DESC LIMIT 1
+                """
+            )
+        except Exception as e:
+            logger.warning(f"Could not fetch prior interpretation: {e}")
+            return ""
+
+        if not row or not row["interpretation_json"]:
+            return ""
+
+        try:
+            prior = json.loads(row["interpretation_json"])
+        except (json.JSONDecodeError, TypeError):
+            return ""
+
+        watch_items = prior.get("watch_items", [])
+        risks = prior.get("risks", [])
+
+        # Skip if prior had empty fields (parsing failure)
+        if not watch_items and not risks:
+            return ""
+
+        # Calculate age
+        assessed_at = row.get("assessed_at")
+        age_str = ""
+        if assessed_at:
+            try:
+                from datetime import timezone
+                age = datetime.now(timezone.utc) - assessed_at
+                hours = age.total_seconds() / 3600
+                if hours < 1:
+                    age_str = f" ({int(age.total_seconds()/60)} minutes ago)"
+                elif hours < 24:
+                    age_str = f" ({hours:.1f} hours ago)"
+                else:
+                    age_str = f" ({hours/24:.1f} days ago)"
+            except Exception:
+                pass
+
+        lines = []
+        lines.append(f"YOUR PREVIOUS ASSESSMENT{age_str} — for analytical continuity:")
+
+        if risks:
+            lines.append("  Previous risks flagged:")
+            for i, risk in enumerate(risks, 1):
+                if isinstance(risk, str):
+                    lines.append(f"    {i}. {risk}")
+
+        if watch_items:
+            lines.append("  Previous watch items:")
+            for i, item in enumerate(watch_items, 1):
+                if isinstance(item, str):
+                    lines.append(f"    {i}. {item}")
+
+        lines.append(
+            "\n  CONTINUITY INSTRUCTIONS: Note whether each previous risk/watch item has "
+            "materialized, worsened, improved, or resolved. If conditions are similar to "
+            "your last assessment, focus on what has CHANGED or EVOLVED rather than "
+            "repeating the same analysis. If a previous watch item has been resolved, "
+            "acknowledge it and replace with a new one."
+        )
+
+        return "\n".join(lines) + "\n\n"
 
     def _regime_to_direction(self, regime: MarketRegime, score: float) -> SignalDirection:
         """

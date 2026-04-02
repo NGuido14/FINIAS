@@ -155,6 +155,19 @@ Prioritize triggers by: (1) fast triggers with small distance, (2) medium trigge
 next data release, (3) slow triggers with "toward_threshold" momentum. Do NOT lead your risk
 section with a slow trigger unless its momentum has been "toward_threshold" for multiple periods.
 
+TEMPORAL CONTEXT — If historical context is provided above, use it to:
+- Frame current levels as part of a trend ("VIX has dropped 10 points over 3 assessments")
+- Identify inflection points ("stress index reversed from rising to falling")
+- Note regime/binding stability or instability ("binding has been inflation for all 5 assessments")
+- Highlight the most significant moves for the reader
+
+PRIOR ASSESSMENT CONTINUITY — If a previous assessment's risks and watch items are provided:
+- For each previous risk: state whether it has materialized, worsened, improved, or resolved
+- For each previous watch item: state whether the metric crossed the threshold, moved toward it, or stabilized
+- If a risk/watch item is no longer relevant, explain why and replace it
+- If a risk/watch item is still active and unchanged, don't repeat the same analysis — note it's unchanged and focus on what's new
+- This creates analytical continuity. Your assessment should BUILD on prior analysis, not repeat it.
+
 ANALYSIS STRUCTURE:
 Produce a thorough free-text analysis covering:
 1. Lead with regime classification, composite score, and the binding constraint

@@ -99,3 +99,12 @@ def test_structuring_prompt_exists():
     assert "Respond with ONLY a JSON" not in MACRO_ANALYSIS_PROMPT
     # Structuring prompt SHOULD require JSON output
     assert "JSON" in MACRO_STRUCTURING_PROMPT
+
+
+def test_macro_analysis_prompt_has_temporal_guidance():
+    """Analysis prompt should include temporal and continuity guidance."""
+    from finias.agents.macro_strategist.prompts.interpretation import MACRO_ANALYSIS_PROMPT
+    assert "TEMPORAL CONTEXT" in MACRO_ANALYSIS_PROMPT
+    assert "PRIOR ASSESSMENT CONTINUITY" in MACRO_ANALYSIS_PROMPT
+    assert "inflection points" in MACRO_ANALYSIS_PROMPT
+    assert "materialized" in MACRO_ANALYSIS_PROMPT

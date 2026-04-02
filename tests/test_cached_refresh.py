@@ -97,3 +97,14 @@ def test_director_accepts_state_param():
     # Should work without state arg (backward compatible)
     director2 = Director(registry=registry)
     assert director2.state is None
+
+
+def test_macro_strategist_has_historical_context_method():
+    """MacroStrategist should have _build_historical_context method."""
+    from finias.agents.macro_strategist.agent import MacroStrategist
+    assert hasattr(MacroStrategist, '_build_historical_context')
+
+def test_macro_strategist_has_prior_assessment_method():
+    """MacroStrategist should have _build_prior_assessment_context method."""
+    from finias.agents.macro_strategist.agent import MacroStrategist
+    assert hasattr(MacroStrategist, '_build_prior_assessment_context')
