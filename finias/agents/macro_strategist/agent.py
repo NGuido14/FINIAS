@@ -56,7 +56,7 @@ from finias.agents.macro_strategist.computations.inflation import (
     analyze_inflation, InflationAnalysis
 )
 from finias.agents.macro_strategist.computations.trajectory import compute_trajectory
-from finias.agents.macro_strategist.prompts.interpretation import MACRO_INTERPRETATION_PROMPT
+from finias.agents.macro_strategist.prompts.interpretation import MACRO_ANALYSIS_PROMPT
 
 logger = logging.getLogger("finias.agent.macro_strategist")
 
@@ -600,10 +600,32 @@ class MacroStrategist(BaseAgent):
         except Exception as e:
             logger.warning(f"Could not fetch prior regime for trajectory: {e}")
 
+        # Fetch prior trigger values for momentum computation
+        prior_trigger_values = {}
+        try:
+            prior_regime_row = await self.cache.db.fetchrow(
+                "SELECT full_regime_json FROM regime_assessments ORDER BY id DESC LIMIT 1"
+            )
+            if prior_regime_row and prior_regime_row["full_regime_json"]:
+                prior_full = json.loads(prior_regime_row["full_regime_json"])
+                prior_kl = prior_full.get("key_levels", {})
+                prior_trigger_values = {
+                    "sahm_value": prior_kl.get("sahm_value"),
+                    "vix": prior_kl.get("vix"),
+                    "hy_spread": prior_kl.get("hy_spread"),
+                    "core_pce_3m_annualized": prior_kl.get("core_pce_3m_ann"),
+                    "core_pce_yoy": prior_kl.get("core_pce_yoy"),
+                    "net_liquidity_trillion": (prior_kl.get("net_liquidity", 0) or 0) / 1_000_000 if (prior_kl.get("net_liquidity") or 0) > 1000 else prior_kl.get("net_liquidity"),
+                    "inflation_surprise_pp": None,  # Computed dynamically, not stored in key_levels
+                }
+        except Exception as e:
+            logger.warning(f"Could not fetch prior trigger values: {e}")
+
         trajectory = compute_trajectory(
             regime_assessment=regime_assessment,
             fed_target_upper=fred_data.get("DFEDTARU", []),
             prior_regime_assessment=prior_regime,
+            prior_trigger_values=prior_trigger_values,
         )
         regime_assessment.trajectory = trajectory.to_dict()
         self._last_trajectory = trajectory
@@ -694,121 +716,135 @@ class MacroStrategist(BaseAgent):
                 error_message=str(e),
             )
 
-    async def _interpret(self, regime: Any, question: str) -> dict[str, Any]:
+    async def _interpret(self, regime, question: str) -> dict:
         """
-        Ask Claude to interpret the regime assessment.
+        Two-step interpretation: analysis then structuring.
 
-        This is the 10% of the work that requires genuine intelligence.
-        The Python did all the math. Claude explains what it means.
+        Step 1: Claude Opus + web search produces free-text analysis.
+                No JSON requirement — Claude thinks freely, searches naturally.
+        Step 2: Claude Sonnet (no web search) structures the free-text
+                into the required JSON format. Clean input, clean output.
 
-        Claude has access to web search to:
-        - Research WHY indicators are moving (e.g., oil up 36% → Iran conflict)
-        - Verify stale data (e.g., check current GDPNow from Atlanta Fed)
-        - Get current market narrative and geopolitical context
-        - Cross-check any data point that seems outdated
+        This eliminates JSON parsing failures caused by web search content
+        (JSON-LD, stray braces, JS snippets) contaminating the JSON output.
         """
+        from finias.core.config.settings import get_settings
+        from finias.agents.macro_strategist.prompts.interpretation import (
+            MACRO_ANALYSIS_PROMPT,
+            MACRO_STRUCTURING_PROMPT,
+        )
         settings = get_settings()
 
+        # Build regime data and data notes (same as before)
         regime_data = json.dumps(regime.to_dict(), indent=2, default=str)
-
-        # Build plain-English notes for fields Claude tends to misinterpret
         data_notes = self._build_data_notes(regime)
-        date_context = f"TODAY'S DATE: {date.today().isoformat()}. All analysis and forward-looking statements should reference dates relative to today.\n\n"
 
-        prompt = date_context + data_notes + MACRO_INTERPRETATION_PROMPT.format(
+        date_context = (
+            f"TODAY'S DATE: {date.today().isoformat()}. "
+            f"All analysis and forward-looking statements should reference "
+            f"dates relative to today.\n\n"
+        )
+
+        # === STEP 1: Analysis (Opus + web search) ===
+        # Claude produces free-text analysis — no JSON requirement
+        analysis_prompt = date_context + data_notes + MACRO_ANALYSIS_PROMPT.format(
             regime_data=regime_data,
             question=question,
         )
 
         from finias.core.utils.retry import retry_claude_call
 
-        response = await retry_claude_call(
+        logger.info("Step 1: Opus analysis with web search...")
+        analysis_response = await retry_claude_call(
             lambda: self._client.messages.create(
                 model=settings.claude_model,
-                max_tokens=3000,
+                max_tokens=4000,
                 tools=[{
                     "type": "web_search_20250305",
                     "name": "web_search",
                 }],
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": analysis_prompt}],
             )
         )
 
-        # Extract text from potentially multi-block response
-        # When Claude uses web search, response contains tool_use and tool_result
-        # blocks alongside text blocks. We need all text blocks.
-        text_parts = []
-        for block in response.content:
+        # Extract all text blocks from the analysis response
+        analysis_parts = []
+        for block in analysis_response.content:
             if hasattr(block, "text"):
-                text_parts.append(block.text)
-        text = "\n".join(text_parts)
+                analysis_parts.append(block.text)
+        analysis_text = "\n".join(analysis_parts)
 
-        # Claude returns JSON with macro_regime, binding_constraint, summary, key_findings, risks, watch_items
+        logger.info(f"Step 1 complete: {len(analysis_text)} chars of analysis")
+
+        # === STEP 2: Structuring (Sonnet, NO web search) ===
+        # Clean text in, clean JSON out. No web search contamination possible.
+        structuring_prompt = MACRO_STRUCTURING_PROMPT.format(
+            analysis_text=analysis_text,
+        )
+
+        logger.info("Step 2: Sonnet JSON structuring...")
+        structure_response = await retry_claude_call(
+            lambda: self._client.messages.create(
+                model=settings.claude_model_fast,
+                max_tokens=2000,
+                messages=[{"role": "user", "content": structuring_prompt}],
+            )
+        )
+
+        # Extract text from structuring response (should be clean JSON)
+        structure_text = ""
+        for block in structure_response.content:
+            if hasattr(block, "text"):
+                structure_text += block.text
+
+        logger.info(f"Step 2 complete: {len(structure_text)} chars")
+
+        # === Parse the structured JSON ===
+        # Step 2 output should be clean JSON, but we keep fallbacks for safety
         try:
-            result = _extract_interpretation_json(text)
-            if not result:
-                # Try parsing the full text directly before falling back
-                try:
-                    text_stripped = text.strip()
-                    if text_stripped.startswith("{"):
-                        result = json.loads(text_stripped)
-                        if not isinstance(result, dict) or "summary" not in result:
-                            result = {}
-                except (json.JSONDecodeError, ValueError):
-                    result = {}
+            # Primary: direct JSON parse (should work ~99% of the time with Step 2)
+            result = json.loads(structure_text.strip())
+            if not isinstance(result, dict) or "summary" not in result:
+                raise json.JSONDecodeError("Missing expected keys", structure_text, 0)
 
-                if not result:
-                    raise json.JSONDecodeError("No valid interpretation JSON found", text, 0)
-
-            # Ensure all expected keys exist
-            result.setdefault("summary", "")
-            result.setdefault("key_findings", [])
-            result.setdefault("risks", [])
-            result.setdefault("watch_items", [])
-            result.setdefault("macro_regime", "")
-            result.setdefault("binding_constraint", "")
-            result.setdefault("key_metrics", {})
-
-            # Prepend binding constraint to summary for downstream visibility
-            if result["binding_constraint"] and result["binding_constraint"] not in result["summary"]:
-                result["summary"] = (
-                    f"Binding constraint: {result['binding_constraint']}. "
-                    + result["summary"]
-                )
         except json.JSONDecodeError:
-            result = {
-                "summary": text,
-                "key_findings": [],
-                "risks": [],
-                "watch_items": [],
-                "macro_regime": "",
-                "binding_constraint": "",
-                "key_metrics": {},
-            }
+            # Secondary: try the key-targeted parser on Step 2 output
+            logger.warning("Step 2 direct parse failed, trying key-targeted extraction...")
+            result = _extract_interpretation_json(structure_text)
 
-            # Secondary attempt: search for a key marker and try parsing from there
-            for _marker in ['"macro_regime"', '"summary"']:
-                _midx = text.find(_marker)
-                if _midx == -1:
-                    continue
-                _open = text.rfind("{", 0, _midx)
-                if _open == -1:
-                    continue
-                _close = text.rfind("}")
-                if _close > _open:
-                    try:
-                        parsed = json.loads(text[_open:_close + 1])
-                        if isinstance(parsed, dict) and "summary" in parsed:
-                            result = parsed
-                            result.setdefault("key_findings", [])
-                            result.setdefault("risks", [])
-                            result.setdefault("watch_items", [])
-                            result.setdefault("macro_regime", "")
-                            result.setdefault("binding_constraint", "")
-                            result.setdefault("key_metrics", {})
-                            break
-                    except (json.JSONDecodeError, ValueError):
-                        continue
+            if not result:
+                # Tertiary: try key-targeted parser on Step 1 output (the analysis text)
+                logger.warning("Step 2 extraction failed, trying Step 1 output...")
+                result = _extract_interpretation_json(analysis_text)
+
+            if not result:
+                # Final fallback: store analysis as summary
+                logger.error("All JSON extraction failed. Storing raw analysis as summary.")
+                result = {
+                    "summary": analysis_text[:2000],  # Truncate if very long
+                    "key_findings": [],
+                    "risks": [],
+                    "watch_items": [],
+                    "macro_regime": "",
+                    "binding_constraint": "",
+                    "key_metrics": {},
+                }
+
+        # Ensure all expected keys exist
+        result.setdefault("summary", "")
+        result.setdefault("key_findings", [])
+        result.setdefault("risks", [])
+        result.setdefault("watch_items", [])
+        result.setdefault("macro_regime", "")
+        result.setdefault("binding_constraint", "")
+        result.setdefault("key_metrics", {})
+
+        # Prepend binding constraint to summary for downstream visibility
+        if result["binding_constraint"] and result["binding_constraint"] not in result["summary"]:
+            result["summary"] = (
+                f"Binding constraint: {result['binding_constraint']}. "
+                + result["summary"]
+            )
 
         return result
 
@@ -1133,15 +1169,35 @@ class MacroStrategist(BaseAgent):
                 f"Cite the web-searched values alongside computed values when they differ materially."
             )
 
-        # --- Scenario Triggers ---
+        # --- Scenario Triggers (with timeframe and momentum) ---
         triggers = traj.get("scenario_triggers", [])
-        critical_triggers = [t for t in triggers if t.get("severity") == "critical" and t.get("distance", 999) < 5]
-        if critical_triggers:
-            for t in critical_triggers:
-                notes.append(
-                    f"- CRITICAL TRIGGER NEARBY: {t['metric']} at {t['current']}, threshold {t['threshold']} "
-                    f"(distance: {t['distance']}). If breached: {t['consequence']}."
-                )
+        # Show fast/critical triggers prominently, slow triggers with context
+        fast_triggers = [t for t in triggers if t.get("timeframe") == "fast" and t.get("distance", 999) < 10]
+        medium_triggers = [t for t in triggers if t.get("timeframe") == "medium" and t.get("distance", 999) < 2]
+        slow_triggers = [t for t in triggers if t.get("timeframe") == "slow" and t.get("momentum") == "toward_threshold"]
+
+        for t in fast_triggers:
+            momentum_str = f", momentum: {t.get('momentum', 'unknown')}" if t.get('momentum') != 'unknown' else ""
+            notes.append(
+                f"- FAST TRIGGER: {t['metric']} at {t['current']}, threshold {t['threshold']} "
+                f"(distance: {t['distance']}{momentum_str}). "
+                f"{t.get('framing_note', '')} If breached: {t['consequence']}."
+            )
+
+        for t in medium_triggers:
+            momentum_str = f", momentum: {t.get('momentum', 'unknown')}" if t.get('momentum') != 'unknown' else ""
+            notes.append(
+                f"- MEDIUM TRIGGER: {t['metric']} at {t['current']}, threshold {t['threshold']} "
+                f"(distance: {t['distance']}{momentum_str}). "
+                f"{t.get('framing_note', '')} If breached: {t['consequence']}."
+            )
+
+        for t in slow_triggers:
+            notes.append(
+                f"- SLOW TRIGGER (deteriorating): {t['metric']} at {t['current']}, threshold {t['threshold']} "
+                f"(distance: {t['distance']}, momentum: toward_threshold, change: {t.get('change', 'N/A')}). "
+                f"{t.get('framing_note', '')} If breached: {t['consequence']}."
+            )
 
         # --- Cross-Asset Correlations ---
         corr_data = ca.get("correlations")

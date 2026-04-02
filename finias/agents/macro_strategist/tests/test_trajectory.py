@@ -434,5 +434,110 @@ class TestScenarioTriggers:
         pass
 
 
+class TestTriggerTimeframes:
+    """Test trigger timeframe and momentum enrichment."""
+
+    def test_trigger_has_timeframe_fields(self):
+        """All triggers should have timeframe and data_frequency."""
+        from finias.agents.macro_strategist.computations.trajectory import compute_scenario_triggers
+        from finias.agents.macro_strategist.computations.regime import RegimeAssessment
+        from finias.core.agents.models import MarketRegime
+
+        regime = RegimeAssessment(
+            primary_regime=MarketRegime.TRANSITION,
+            key_levels={"vix": 30.0, "sahm_value": 0.267, "hy_spread": 3.5,
+                        "core_pce_3m_ann": 3.66, "core_pce_yoy": 3.06, "net_liquidity": 5782000},
+            inflation={"expectations": {"breakeven_5y": 2.57}},
+        )
+        triggers = compute_scenario_triggers(regime)
+
+        for t in triggers:
+            assert "timeframe" in t, f"Trigger {t['id']} missing timeframe"
+            assert "data_frequency" in t, f"Trigger {t['id']} missing data_frequency"
+            assert t["timeframe"] in ("fast", "medium", "slow"), f"Invalid timeframe: {t['timeframe']}"
+
+    def test_trigger_momentum_toward_threshold(self):
+        """Momentum should be 'toward_threshold' when value is increasing toward a > trigger."""
+        from finias.agents.macro_strategist.computations.trajectory import compute_scenario_triggers
+        from finias.agents.macro_strategist.computations.regime import RegimeAssessment
+        from finias.core.agents.models import MarketRegime
+
+        regime = RegimeAssessment(
+            primary_regime=MarketRegime.TRANSITION,
+            key_levels={"vix": 33.0, "sahm_value": 0.30, "hy_spread": 4.0,
+                        "core_pce_3m_ann": 3.8, "core_pce_yoy": 3.2, "net_liquidity": 5500000},
+            inflation={"expectations": {"breakeven_5y": 2.57}},
+        )
+        prior_values = {"vix": 28.0, "sahm_value": 0.25, "hy_spread": 3.5}
+        triggers = compute_scenario_triggers(regime, prior_trigger_values=prior_values)
+
+        vix_crisis = next(t for t in triggers if t["id"] == "vix_crisis")
+        assert vix_crisis["momentum"] == "toward_threshold"
+        assert vix_crisis["change"] > 0
+
+        sahm = next(t for t in triggers if t["id"] == "sahm_recession")
+        assert sahm["momentum"] == "toward_threshold"
+
+    def test_trigger_momentum_improving(self):
+        """Momentum should be 'improving' when value is moving away from threshold."""
+        from finias.agents.macro_strategist.computations.trajectory import compute_scenario_triggers
+        from finias.agents.macro_strategist.computations.regime import RegimeAssessment
+        from finias.core.agents.models import MarketRegime
+
+        regime = RegimeAssessment(
+            primary_regime=MarketRegime.TRANSITION,
+            key_levels={"vix": 22.0, "sahm_value": 0.20, "hy_spread": 3.0,
+                        "core_pce_3m_ann": 3.2, "core_pce_yoy": 2.8, "net_liquidity": 6000000},
+            inflation={"expectations": {"breakeven_5y": 2.57}},
+        )
+        prior_values = {"vix": 28.0, "sahm_value": 0.27, "hy_spread": 3.5}
+        triggers = compute_scenario_triggers(regime, prior_trigger_values=prior_values)
+
+        vix_crisis = next(t for t in triggers if t["id"] == "vix_crisis")
+        assert vix_crisis["momentum"] == "improving"
+
+        sahm = next(t for t in triggers if t["id"] == "sahm_recession")
+        assert sahm["momentum"] == "improving"
+
+    def test_trigger_framing_note_generated(self):
+        """All triggers should have a framing_note string."""
+        from finias.agents.macro_strategist.computations.trajectory import compute_scenario_triggers
+        from finias.agents.macro_strategist.computations.regime import RegimeAssessment
+        from finias.core.agents.models import MarketRegime
+
+        regime = RegimeAssessment(
+            primary_regime=MarketRegime.TRANSITION,
+            key_levels={"vix": 30.0, "sahm_value": 0.267, "hy_spread": 3.5,
+                        "core_pce_3m_ann": 3.66, "core_pce_yoy": 3.06, "net_liquidity": 5782000},
+            inflation={"expectations": {"breakeven_5y": 2.57}},
+        )
+        prior_values = {"vix": 28.0, "sahm_value": 0.25}
+        triggers = compute_scenario_triggers(regime, prior_trigger_values=prior_values)
+
+        for t in triggers:
+            assert "framing_note" in t, f"Trigger {t['id']} missing framing_note"
+            assert isinstance(t["framing_note"], str)
+            assert len(t["framing_note"]) > 0
+
+    def test_trigger_no_prior_values_graceful(self):
+        """Triggers should work when no prior values are available."""
+        from finias.agents.macro_strategist.computations.trajectory import compute_scenario_triggers
+        from finias.agents.macro_strategist.computations.regime import RegimeAssessment
+        from finias.core.agents.models import MarketRegime
+
+        regime = RegimeAssessment(
+            primary_regime=MarketRegime.TRANSITION,
+            key_levels={"vix": 30.0, "sahm_value": 0.267, "hy_spread": 3.5,
+                        "core_pce_3m_ann": 3.66, "core_pce_yoy": 3.06, "net_liquidity": 5782000},
+            inflation={"expectations": {"breakeven_5y": 2.57}},
+        )
+        # No prior values
+        triggers = compute_scenario_triggers(regime)
+
+        for t in triggers:
+            assert t["momentum"] == "unknown"
+            assert t["framing_note"] == "Insufficient history for momentum assessment."
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -85,3 +85,17 @@ def test_extract_interpretation_json_json_with_trailing_text():
     result = _extract_interpretation_json(text)
     assert result.get("macro_regime") == "Risk-On"
     assert result.get("summary") == "Broad expansion underway."
+
+
+def test_structuring_prompt_exists():
+    """Verify the structuring prompt can be imported."""
+    from finias.agents.macro_strategist.prompts.interpretation import (
+        MACRO_ANALYSIS_PROMPT,
+        MACRO_STRUCTURING_PROMPT,
+    )
+    assert "regime_data" in MACRO_ANALYSIS_PROMPT or "regime_data" in str(MACRO_ANALYSIS_PROMPT)
+    assert "{analysis_text}" in MACRO_STRUCTURING_PROMPT
+    # Analysis prompt should NOT require JSON output
+    assert "Respond with ONLY a JSON" not in MACRO_ANALYSIS_PROMPT
+    # Structuring prompt SHOULD require JSON output
+    assert "JSON" in MACRO_STRUCTURING_PROMPT

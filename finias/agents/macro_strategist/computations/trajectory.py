@@ -593,8 +593,26 @@ def compute_position_sizing(
     }
 
 
+# === Trigger Timeframe Classification ===
+# Defines how quickly each trigger's underlying metric can change.
+# "fast" = daily market data, can fire intraday
+# "medium" = monthly economic releases, one print can move it significantly
+# "slow" = monthly/quarterly, moves gradually over months
+TRIGGER_TIMEFRAMES = {
+    "sahm_recession":             {"timeframe": "slow",   "data_frequency": "monthly"},
+    "vix_crisis":                 {"timeframe": "fast",   "data_frequency": "daily"},
+    "vix_normalization":          {"timeframe": "fast",   "data_frequency": "daily"},
+    "credit_stress":              {"timeframe": "fast",   "data_frequency": "daily"},
+    "credit_crisis":              {"timeframe": "fast",   "data_frequency": "daily"},
+    "inflation_acceleration":     {"timeframe": "medium", "data_frequency": "monthly"},
+    "inflation_normalization":    {"timeframe": "medium", "data_frequency": "monthly"},
+    "inflation_surprise_extreme": {"timeframe": "medium", "data_frequency": "monthly"},
+    "liquidity_drain":            {"timeframe": "slow",   "data_frequency": "weekly"},
+}
+
+
 def compute_scenario_triggers(
-    regime_assessment,
+    regime_assessment, prior_trigger_values: dict = None,
 ) -> list[dict]:
     """
     Generate structured scenario triggers from current macro levels.
@@ -725,6 +743,71 @@ def compute_scenario_triggers(
             "consequence": "Liquidity tightening, reduce risk, raise cash",
             "severity": "high",
         })
+
+    # === Enrich triggers with timeframe and momentum ===
+    if prior_trigger_values is None:
+        prior_trigger_values = {}
+
+    for trigger in triggers:
+        tid = trigger["id"]
+        tf_info = TRIGGER_TIMEFRAMES.get(tid, {"timeframe": "medium", "data_frequency": "unknown"})
+        trigger["timeframe"] = tf_info["timeframe"]
+        trigger["data_frequency"] = tf_info["data_frequency"]
+
+        # Compute momentum from prior values
+        metric = trigger["metric"]
+        current = trigger["current"]
+        prior = prior_trigger_values.get(metric)
+        operator = trigger["operator"]
+
+        if prior is not None and current is not None:
+            change = current - prior
+
+            # Determine if moving toward or away from threshold
+            if operator == ">":
+                if change > 0.01:
+                    momentum = "toward_threshold"
+                elif change < -0.01:
+                    momentum = "improving"
+                else:
+                    momentum = "stable"
+            else:  # operator == "<"
+                if change < -0.01:
+                    momentum = "toward_threshold"
+                elif change > 0.01:
+                    momentum = "improving"
+                else:
+                    momentum = "stable"
+
+            trigger["momentum"] = momentum
+            trigger["prior_value"] = round(prior, 4)
+            trigger["change"] = round(change, 4)
+        else:
+            trigger["momentum"] = "unknown"
+            trigger["prior_value"] = None
+            trigger["change"] = None
+
+        # Generate framing note
+        timeframe = trigger["timeframe"]
+        momentum = trigger["momentum"]
+        distance = trigger.get("distance", 0)
+
+        if momentum == "toward_threshold":
+            if timeframe == "fast":
+                trigger["framing_note"] = f"Approaching threshold rapidly. Could fire within days."
+            elif timeframe == "medium":
+                trigger["framing_note"] = f"Moving toward threshold. Watch next data release for potential breach."
+            else:  # slow
+                trigger["framing_note"] = (
+                    f"Deteriorating gradually. Markets will front-run this "
+                    f"well before formal trigger breach."
+                )
+        elif momentum == "improving":
+            trigger["framing_note"] = "Moving away from threshold. Background monitoring only."
+        elif momentum == "stable":
+            trigger["framing_note"] = "Flat near current level. Watch for directional change."
+        else:
+            trigger["framing_note"] = "Insufficient history for momentum assessment."
 
     return triggers
 
@@ -1024,6 +1107,7 @@ def compute_trajectory(
     regime_assessment,
     fed_target_upper: list[dict],
     prior_regime_assessment=None,
+    prior_trigger_values: dict = None,
 ) -> TrajectoryAssessment:
     """
     Compute the full trajectory assessment from a regime assessment.
@@ -1129,7 +1213,7 @@ def compute_trajectory(
     result.reduce_overall_exposure = sizing["reduce_overall_exposure"]
 
     # === 9. Scenario Triggers ===
-    result.scenario_triggers = compute_scenario_triggers(regime_assessment)
+    result.scenario_triggers = compute_scenario_triggers(regime_assessment, prior_trigger_values=prior_trigger_values)
 
     # === 10. Velocity Context ===
     velocity = compute_velocity_context(regime_assessment)
