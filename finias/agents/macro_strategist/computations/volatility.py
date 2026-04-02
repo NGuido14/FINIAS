@@ -58,6 +58,13 @@ class VolatilityAnalysis:
     vix_vix3m_ratio: Optional[float] = None          # VIX / VIX3M — >1 = backwardation
     term_structure_shape: str = "unknown"             # contango, flat, backwardation
 
+    # CBOE SKEW Index — tail risk pricing
+    # SKEW measures how much investors pay for OTM put protection
+    # Normal: 100-130. Elevated: 130-150. Extreme: >150
+    # High SKEW + low VIX = "calm surface, hedging underneath"
+    skew_current: Optional[float] = None
+    skew_regime: str = "unknown"                     # complacent, normal, elevated, extreme
+
     # Enhanced score
     vol_score: float = 0.0                           # -1 (bearish high vol) to +1 (bullish low vol)
 
@@ -94,6 +101,14 @@ class VolatilityAnalysis:
                 "vix_vix3m_ratio": self.vix_vix3m_ratio,
                 "shape": self.term_structure_shape,
             },
+            "skew": {
+                "current": self.skew_current,
+                "regime": self.skew_regime,
+                "_note": "CBOE SKEW Index. Measures demand for OTM put protection. "
+                         "100-130 = normal. 130-150 = elevated hedging demand. >150 = extreme "
+                         "tail risk pricing. High SKEW + low VIX = institutions hedging "
+                         "quietly while surface appears calm.",
+            },
             "vol_score": self.vol_score,
         }
 
@@ -102,6 +117,7 @@ def analyze_volatility(
     vix_series: list[dict],
     spx_prices: list[dict],
     vix3m_series: list[dict] = None,
+    skew_series: list[dict] = None,
 ) -> VolatilityAnalysis:
     """
     Perform complete volatility analysis.
@@ -169,6 +185,20 @@ def analyze_volatility(
             else:
                 term_shape = "flat"
 
+    # SKEW Index — tail risk pricing
+    skew_current = None
+    skew_regime = "unknown"
+    if skew_series and len(skew_series) > 0:
+        skew_current = skew_series[-1]["value"]
+        if skew_current < 120:
+            skew_regime = "complacent"
+        elif skew_current < 135:
+            skew_regime = "normal"
+        elif skew_current < 150:
+            skew_regime = "elevated"
+        else:
+            skew_regime = "extreme"
+
     return VolatilityAnalysis(
         vix_current=vix_current,
         vix_percentile_1y=vix_percentile,
@@ -188,6 +218,8 @@ def analyze_volatility(
         vix3m_current=vix3m,
         vix_vix3m_ratio=vix_vix3m_ratio,
         term_structure_shape=term_shape,
+        skew_current=skew_current,
+        skew_regime=skew_regime,
     )
 
 

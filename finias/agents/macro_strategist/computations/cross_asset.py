@@ -53,6 +53,12 @@ class CrossAssetAnalysis:
     oil_change_20d_pct: Optional[float] = None
     oil_signal: str = "neutral"               # demand_driven, supply_shock, deflationary, neutral
 
+    # Brent crude (global benchmark — more relevant than WTI during geopolitical shocks)
+    brent_price: Optional[float] = None
+    brent_change_20d_pct: Optional[float] = None
+    wti_brent_spread: Optional[float] = None       # WTI - Brent (negative = Brent premium)
+    wti_brent_spread_widening: bool = False         # True if |spread| > $5 (geopolitical signal)
+
     # Stock-bond correlation
     stock_bond_corr_20d: Optional[float] = None
     stock_bond_corr_60d: Optional[float] = None
@@ -102,8 +108,13 @@ class CrossAssetAnalysis:
                 "signal": self.copper_gold_signal,
             },
             "oil": {
-                "price": self.oil_price,
-                "change_20d_pct": self.oil_change_20d_pct,
+                "wti_price": self.oil_price,
+                "wti_change_20d_pct": self.oil_change_20d_pct,
+                "brent_price": self.brent_price,
+                "brent_change_20d_pct": self.brent_change_20d_pct,
+                "wti_brent_spread": self.wti_brent_spread,
+                "wti_brent_spread_widening": self.wti_brent_spread_widening,
+                "_spread_note": "WTI minus Brent. Negative means Brent premium. Spread > $5 signals geopolitical supply disruption affecting global more than domestic.",
                 "signal": self.oil_signal,
             },
             "stock_bond_correlation": {
@@ -140,6 +151,7 @@ def analyze_cross_assets(
     copper_prices: list[dict] = None,    # CPER or JJC ETF prices
     gold_prices: list[dict] = None,      # GLD prices
     oil_series: list[dict] = None,       # WTI from FRED (DCOILWTICO)
+    brent_series: list[dict] = None,     # Brent from FRED (DCOILBRENTEU)
     spy_prices: list[dict] = None,       # SPY for correlations
     tlt_prices: list[dict] = None,       # TLT for stock-bond correlation
     iwm_prices: list[dict] = None,       # IWM for risk appetite
@@ -174,6 +186,19 @@ def analyze_cross_assets(
     # === Oil ===
     if oil_series:
         _analyze_oil(result, oil_series)
+
+    # Brent crude and WTI-Brent spread
+    if brent_series and len(brent_series) > 0:
+        result.brent_price = brent_series[-1]["value"]
+        if len(brent_series) >= 20:
+            old_brent = brent_series[-20]["value"]
+            if old_brent > 0:
+                result.brent_change_20d_pct = (brent_series[-1]["value"] / old_brent - 1) * 100
+
+        # Compute WTI-Brent spread
+        if result.oil_price is not None and result.brent_price is not None:
+            result.wti_brent_spread = round(result.oil_price - result.brent_price, 2)
+            result.wti_brent_spread_widening = abs(result.wti_brent_spread) > 5.0
 
     # === Stock-Bond Correlation ===
     if spy_prices and tlt_prices:

@@ -340,7 +340,8 @@ async def check_computations(cache: MarketDataCache):
         spx_prices = [{"date": str(b["trade_date"]), "close": float(b["close"])} for b in spx_bars]
 
         from finias.agents.macro_strategist.computations.volatility import analyze_volatility
-        vol = analyze_volatility(vix_series=vix, spx_prices=spx_prices, vix3m_series=vix3m)
+        skew = await cache.get_fred_series("SKEW", from_date=from_date)
+        vol = analyze_volatility(vix_series=vix, spx_prices=spx_prices, vix3m_series=vix3m, skew_series=skew)
         ok(f"Volatility: VIX={vol.vix_current}, regime={vol.vol_regime}, "
            f"risk_score={vol.vol_risk_score:.2f}")
         if vol.vix3m_current is not None:
@@ -348,6 +349,10 @@ async def check_computations(cache: MarketDataCache):
                f"term_structure={vol.term_structure_shape}")
         if vol.variance_risk_premium is not None:
             ok(f"  VRP={vol.variance_risk_premium:.2f}, vrp_regime={vol.vrp_regime}")
+            skew = vol.skew_current
+            skew_regime = vol.skew_regime
+            if skew is not None:
+                ok(f"  SKEW={skew:.0f}, skew_regime={skew_regime}")
     except Exception as e:
         fail(f"Volatility: {e}")
 
@@ -529,6 +534,7 @@ async def check_computations(cache: MarketDataCache):
             copper_prices=add_syms.get("CPER"),
             gold_prices=add_syms.get("GLD"),
             oil_series=await cache.get_fred_series("DCOILWTICO", from_date=from_date),
+            brent_series=await cache.get_fred_series("DCOILBRENTEU", from_date=from_date),
             spy_prices=spx_prices,
             tlt_prices=add_syms.get("TLT"),
             iwm_prices=add_syms.get("IWM"),
@@ -604,6 +610,7 @@ async def check_computations(cache: MarketDataCache):
                 copper_prices=diag_syms.get("CPER"),
                 gold_prices=diag_syms.get("GLD"),
                 oil_series=await cache.get_fred_series("DCOILWTICO", from_date=from_date),
+                brent_series=await cache.get_fred_series("DCOILBRENTEU", from_date=from_date),
                 spy_prices=spx_prices,
                 tlt_prices=diag_syms.get("TLT"),
                 iwm_prices=diag_syms.get("IWM"),
@@ -719,6 +726,15 @@ async def check_computations(cache: MarketDataCache):
 # 6. Table Usage Summary
 # ============================================================
 
+async def check_ground_truth(db: DatabasePool, fred: FredClient):
+    header("7. GROUND-TRUTH VALIDATION")
+    try:
+        from finias.validation.ground_truth import run_all_validations
+        await run_all_validations(db, fred)
+    except Exception as e:
+        print(f"  ⚠ Ground-truth validation failed: {e}")
+
+
 async def table_usage_summary(db: DatabasePool):
     header("6. TABLE USAGE SUMMARY & RECOMMENDATIONS")
 
@@ -767,6 +783,7 @@ async def main():
         await check_polygon_data(db)
         await check_matrix(db)
         await check_computations(cache)
+        await check_ground_truth(db, fred)
         await table_usage_summary(db)
 
         # Cleanup

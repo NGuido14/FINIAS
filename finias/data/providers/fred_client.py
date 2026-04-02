@@ -101,6 +101,12 @@ MACRO_SERIES = {
     "DFII10": "10-Year Treasury Inflation-Indexed Security (TIPS Real Yield)",
     "THREEFYTP10": "10-Year Treasury Term Premium (Adrian-Crump-Moench)",
 
+    # === GROUND-TRUTH VALIDATION SERIES ===
+    "SAHMREALTIME": "Real-time Sahm Rule Recession Indicator (FRED official)",
+
+    # === VOLATILITY ENHANCEMENTS ===
+    "SKEW": "CBOE SKEW Index",
+
     # === LABOR MARKET ===
     "U6RATE": "Total Unemployed Plus Marginally Attached Plus Part-Time for Economic Reasons (U-6)",
     "CIVPART": "Civilian Labor Force Participation Rate",

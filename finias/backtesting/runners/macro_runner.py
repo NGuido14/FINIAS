@@ -263,6 +263,7 @@ async def main():
                     copper_prices=polygon_as_of.get("CPER"),
                     gold_prices=polygon_as_of.get("GLD"),
                     oil_series=fred_as_of.get("DCOILWTICO", []),
+                    brent_series=fred_as_of.get("DCOILBRENTEU", []),
                     spy_prices=spx_prices,
                     tlt_prices=polygon_as_of.get("TLT"),
                     iwm_prices=polygon_as_of.get("IWM"),

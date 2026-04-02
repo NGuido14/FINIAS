@@ -386,6 +386,7 @@ class MacroStrategist(BaseAgent):
                 vix_series=fred_data.get("VIXCLS", []),
                 spx_prices=spx_prices,
                 vix3m_series=fred_data.get("VXVCLS", []),
+                skew_series=fred_data.get("SKEW", []),
             )
             # Add correlation if we have sector data
             if len(sector_prices) >= 5:
@@ -428,6 +429,7 @@ class MacroStrategist(BaseAgent):
                 copper_prices=additional_symbols.get("CPER"),
                 gold_prices=additional_symbols.get("GLD"),
                 oil_series=fred_data.get("DCOILWTICO", []),
+                brent_series=fred_data.get("DCOILBRENTEU", []),
                 spy_prices=spx_prices,
                 tlt_prices=additional_symbols.get("TLT"),
                 iwm_prices=additional_symbols.get("IWM"),
@@ -959,6 +961,32 @@ class MacroStrategist(BaseAgent):
                     f"(ratio change: {rsp_change:.4f}). Broad breadth improving."
                 )
 
+        # --- SKEW Index context ---
+        vol = regime_dict.get("components", {}).get("volatility", {})
+        skew_data = vol.get("skew", {})
+        skew_val = skew_data.get("current")
+        skew_regime = skew_data.get("regime")
+        if skew_val is not None:
+            vix_val = vol.get("vix", {}).get("current")
+            if skew_regime in ("elevated", "extreme"):
+                if vix_val and vix_val < 25:
+                    notes.append(
+                        f"- SKEW-VIX DIVERGENCE: SKEW at {skew_val:.0f} ({skew_regime}) while VIX "
+                        f"only {vix_val:.1f}. This means institutions are quietly hedging tail risk "
+                        f"even though headline volatility appears moderate. Watch for delayed VIX catch-up."
+                    )
+                else:
+                    notes.append(
+                        f"- SKEW INDEX: {skew_val:.0f} ({skew_regime}). Elevated demand for "
+                        f"out-of-the-money put protection, confirming stress visible in VIX."
+                    )
+            elif skew_regime == "complacent" and vix_val and vix_val > 25:
+                notes.append(
+                    f"- SKEW-VIX DIVERGENCE: VIX at {vix_val:.1f} (elevated) but SKEW only "
+                    f"{skew_val:.0f} (complacent). Institutions are NOT hedging despite elevated "
+                    f"headline vol — suggests they view current volatility as transient."
+                )
+
         # --- GDPNow Staleness Check ---
         bc = regime_dict.get("components", {}).get("business_cycle", {})
         gdpnow_data = bc.get("gdp_nowcast", {})
@@ -1163,12 +1191,24 @@ class MacroStrategist(BaseAgent):
                     stale_metrics.append("Dollar/DXY (computed value unavailable)")
 
             # Always include oil and SPY in high-velocity environments
-            oil_val = ca.get("oil", {}).get("price")
-            if oil_val is not None:
-                stale_metrics.append(
-                    f"Oil/WTI (computed: ${oil_val:.2f} — NOTE: this is WTI, not Brent; "
-                    f"in geopolitical supply disruptions Brent can trade $10-30 above WTI)"
-                )
+            oil_wti = ca.get("oil", {}).get("wti_price")
+            oil_brent = ca.get("oil", {}).get("brent_price")
+            spread = ca.get("oil", {}).get("wti_brent_spread")
+            spread_wide = ca.get("oil", {}).get("wti_brent_spread_widening", False)
+
+            if oil_wti is not None:
+                oil_note = f"Oil/WTI (computed: ${oil_wti:.2f})"
+                if oil_brent is not None:
+                    oil_note += f", Brent (computed: ${oil_brent:.2f})"
+                    if spread is not None:
+                        oil_note += f", spread: ${spread:.2f}"
+                if spread_wide:
+                    oil_note += (
+                        " — NOTE: WTI-Brent spread exceeds $5, indicating geopolitical "
+                        "supply disruption affecting global benchmarks more than domestic. "
+                        "Use Brent as the primary oil reference for global impact assessment."
+                    )
+                stale_metrics.append(oil_note)
             else:
                 stale_metrics.append("Oil/WTI (computed value unavailable)")
 
@@ -1179,6 +1219,19 @@ class MacroStrategist(BaseAgent):
                 f"materially outdated. USE WEB SEARCH to verify current levels before referencing "
                 f"these in your analysis: {', '.join(stale_metrics)}. "
                 f"Cite the web-searched values alongside computed values when they differ materially."
+            )
+
+        # --- Oil: WTI vs Brent context ---
+        oil_data = ca.get("oil", {})
+        wti_p = oil_data.get("wti_price")
+        brent_p = oil_data.get("brent_price")
+        spread_val = oil_data.get("wti_brent_spread")
+        if wti_p is not None and brent_p is not None and spread_val is not None:
+            notes.append(
+                f"- OIL PRICES: WTI ${wti_p:.2f}, Brent ${brent_p:.2f}, "
+                f"spread ${spread_val:.2f} (WTI minus Brent). "
+                f"{'SPREAD WIDENED >$5 — geopolitical supply premium on global benchmark. ' if abs(spread_val) > 5 else ''}"
+                f"Use Brent for global impact, WTI for domestic impact."
             )
 
         # --- Scenario Triggers (with timeframe and momentum) ---
