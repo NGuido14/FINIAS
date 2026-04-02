@@ -263,7 +263,7 @@ class MacroStrategist(BaseAgent):
             "NFCI", "ANFCI", "STLFSI4",
             "TOTBKCR", "TOTALSL", "M2SL",
             # Volatility
-            "VIXCLS", "VXVCLS",
+            "VIXCLS", "VXVCLS", "SKEW",
             # Cross-Asset
             "BAMLH0A0HYM2", "DTWEXBGS",
             # Inflation
@@ -272,7 +272,7 @@ class MacroStrategist(BaseAgent):
             "STICKCPIM159SFRBATL", "FLEXCPIM159SFRBATL",
             "PCETRIM12M159SFRBDAL",
             "T5YIE", "T10YIE", "T5YIFR",
-            "PPIACO", "CES0500000003", "DCOILWTICO",
+            "PPIACO", "CES0500000003", "DCOILWTICO", "DCOILBRENTEU",
             # Business Cycle
             "UNRATE", "U6RATE", "ICSA", "CCSA",
             "JTSJOL", "JTSQUR",
