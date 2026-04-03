@@ -143,6 +143,33 @@ class Director(BaseAgent):
                         f"Sahm: {kl.get('sahm_value', 'N/A')}, "
                         f"Net Liq: ${kl.get('net_liquidity', 0)/1_000_000:.2f}T")
 
+            # Also read live prices from shared infrastructure
+            try:
+                from finias.data.providers.price_feed import get_live_prices
+                live = await get_live_prices(self.state)
+            except Exception:
+                live = None
+
+            # Live prices from shared price feed
+            if live and not live.get("error"):
+                live_parts = []
+                if live.get("vix") is not None:
+                    live_parts.append(f"VIX={live['vix']}")
+                if live.get("wti") is not None:
+                    live_parts.append(f"WTI=${live['wti']}")
+                if live.get("brent") is not None:
+                    live_parts.append(f"Brent=${live['brent']}")
+                if live.get("gold") is not None:
+                    live_parts.append(f"Gold=${live['gold']}")
+                if live.get("dxy") is not None:
+                    live_parts.append(f"DXY={live['dxy']}")
+                if live.get("spx") is not None:
+                    live_parts.append(f"SPX={live['spx']}")
+                if live.get("skew") is not None:
+                    live_parts.append(f"SKEW={live['skew']}")
+                if live_parts:
+                    parts.append(f"Live Prices: {', '.join(live_parts)}")
+
             # Trajectory
             forward_bias = trajectory.get("forward_bias", {})
             sizing = trajectory.get("position_sizing", {})

@@ -22,6 +22,7 @@ class RedisState:
         agent:{name}:health          — Latest health status (JSON)
         agent:{name}:last_updated    — Timestamp of last update
         regime:current               — Current market regime assessment
+        prices:live                  — Live market prices from yfinance (shared, any agent reads)
         data:freshness:{source}      — When data from a source was last refreshed
 
     All values have TTL to prevent stale data from persisting.

@@ -104,9 +104,6 @@ MACRO_SERIES = {
     # === GROUND-TRUTH VALIDATION SERIES ===
     "SAHMREALTIME": "Real-time Sahm Rule Recession Indicator (FRED official)",
 
-    # === VOLATILITY ENHANCEMENTS ===
-    "SKEW": "CBOE SKEW Index",
-
     # === LABOR MARKET ===
     "U6RATE": "Total Unemployed Plus Marginally Attached Plus Part-Time for Economic Reasons (U-6)",
     "CIVPART": "Civilian Labor Force Participation Rate",

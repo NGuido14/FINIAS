@@ -63,6 +63,18 @@ async def main():
     macro = MacroStrategist(cache=cache, state=state)
 
     try:
+        # Fetch live prices and store in Redis (shared infrastructure)
+        logger.info("Fetching live market prices...")
+        try:
+            from finias.data.providers.price_feed import fetch_live_prices, store_live_prices
+            live_prices = await fetch_live_prices()
+            await store_live_prices(state, live_prices)
+            fetched = {k: v for k, v in live_prices.items()
+                       if k not in ("fetched_at", "source", "error") and v is not None}
+            logger.info(f"  Live prices: {', '.join(k + '=' + str(v) for k, v in fetched.items())}")
+        except Exception as e:
+            logger.warning(f"  Live price feed unavailable: {e}")
+
         # Run the full macro pipeline with comprehensive morning prompt
         logger.info("Running full macro pipeline...")
         query = AgentQuery(

@@ -166,6 +166,15 @@ async def main():
                 try:
                     macro = components["registry"].get_agent("macro_strategist")
                     if macro:
+                        # Fetch live prices first
+                        try:
+                            from finias.data.providers.price_feed import fetch_live_prices, store_live_prices
+                            lp = await fetch_live_prices()
+                            await store_live_prices(components["state"], lp)
+                            fetched_count = sum(1 for k, v in lp.items() if k not in ("fetched_at", "source", "error") and v is not None)
+                            print(f"  Live prices fetched: {fetched_count}/7 instruments")
+                        except Exception as e:
+                            print(f"  Live prices unavailable: {e}")
                         from finias.agents.macro_strategist.prompts.refresh import MORNING_REFRESH_PROMPT
                         refresh_query = AgentQuery(
                             asking_agent="cli_refresh",

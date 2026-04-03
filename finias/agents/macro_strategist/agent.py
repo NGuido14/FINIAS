@@ -263,7 +263,7 @@ class MacroStrategist(BaseAgent):
             "NFCI", "ANFCI", "STLFSI4",
             "TOTBKCR", "TOTALSL", "M2SL",
             # Volatility
-            "VIXCLS", "VXVCLS", "SKEW",
+            "VIXCLS", "VXVCLS",
             # Cross-Asset
             "BAMLH0A0HYM2", "DTWEXBGS",
             # Inflation
@@ -352,6 +352,23 @@ class MacroStrategist(BaseAgent):
         if missing_polygon:
             logger.warning(f"Missing Polygon symbols ({len(missing_polygon)}): {', '.join(missing_polygon)}")
 
+        # === Read live prices from shared Redis cache ===
+        live_prices = {}
+        try:
+            from finias.data.providers.price_feed import get_live_prices
+            live_prices = await get_live_prices(self.state) or {}
+            if live_prices and not live_prices.get("error"):
+                fetched = {k: v for k, v in live_prices.items()
+                           if k not in ("fetched_at", "source", "error") and v is not None}
+                logger.info(f"Live prices from Redis: {len(fetched)} instruments")
+            else:
+                logger.info("No live prices available in Redis")
+        except Exception as e:
+            logger.warning(f"Could not read live prices: {e}")
+
+        # Store for use in data notes during interpretation
+        self._live_prices = live_prices
+
         # === Run ALL computation modules ===
         _computation_failures = []
 
@@ -382,11 +399,17 @@ class MacroStrategist(BaseAgent):
 
         # 2. Volatility (enhanced with term structure)
         try:
+            # SKEW comes from live prices (yfinance) — not available on FRED
+            skew_series = []
+            skew_val = live_prices.get("skew") if live_prices else None
+            if skew_val is not None:
+                skew_series = [{"date": date.today().isoformat(), "value": skew_val}]
+
             vol_analysis = analyze_volatility(
                 vix_series=fred_data.get("VIXCLS", []),
                 spx_prices=spx_prices,
                 vix3m_series=fred_data.get("VXVCLS", []),
-                skew_series=fred_data.get("SKEW", []),
+                skew_series=skew_series,
             )
             # Add correlation if we have sector data
             if len(sector_prices) >= 5:
@@ -739,7 +762,7 @@ class MacroStrategist(BaseAgent):
 
         # Build regime data and data notes (same as before)
         regime_data = json.dumps(regime.to_dict(), indent=2, default=str)
-        data_notes = self._build_data_notes(regime)
+        data_notes = self._build_data_notes(regime, live_prices=getattr(self, '_live_prices', None))
 
         date_context = (
             f"TODAY'S DATE: {date.today().isoformat()}. "
@@ -862,7 +885,7 @@ class MacroStrategist(BaseAgent):
 
         return result
 
-    def _build_data_notes(self, regime) -> str:
+    def _build_data_notes(self, regime, live_prices: dict = None) -> str:
         """
         Build plain-English notes for fields that Claude tends to misinterpret.
 
@@ -885,6 +908,81 @@ class MacroStrategist(BaseAgent):
                 f"over the last 20 trading days. The raw value is {iwm_val:.2f}pp. "
                 f"This is NOT {abs(iwm_val * 10):.1f}% — it is {abs(iwm_val):.2f} percentage points."
             )
+
+        # --- Live Price Divergences (yfinance vs FRED) ---
+        lp = live_prices or {}
+        if lp and not lp.get("error"):
+            divergence_lines = []
+
+            # VIX
+            live_vix = lp.get("vix")
+            fred_vix = regime_dict.get("components", {}).get("volatility", {}).get("vix", {}).get("current")
+            if live_vix is not None and fred_vix is not None and abs(live_vix - fred_vix) > 1.0:
+                divergence_lines.append(
+                    f"VIX: FRED={fred_vix:.2f}, Live={live_vix:.2f}. USE LIVE VALUE."
+                )
+
+            # WTI
+            live_wti = lp.get("wti")
+            fred_wti = regime_dict.get("components", {}).get("cross_asset", {}).get("oil", {}).get("wti_price")
+            if live_wti is not None and fred_wti is not None and abs(live_wti - fred_wti) > 2.0:
+                divergence_lines.append(
+                    f"WTI Oil: FRED=${fred_wti:.2f}, Live=${live_wti:.2f}. USE LIVE VALUE."
+                )
+
+            # Brent
+            live_brent = lp.get("brent")
+            fred_brent = regime_dict.get("components", {}).get("cross_asset", {}).get("oil", {}).get("brent_price")
+            if live_brent is not None and fred_brent is not None and abs(live_brent - fred_brent) > 2.0:
+                divergence_lines.append(
+                    f"Brent Oil: FRED=${fred_brent:.2f}, Live=${live_brent:.2f}. USE LIVE VALUE."
+                )
+
+            # Live WTI-Brent spread (more current than FRED-based spread)
+            if live_wti is not None and live_brent is not None:
+                live_spread = live_wti - live_brent
+                spread_note = f"LIVE WTI-Brent Spread: ${live_spread:.2f}"
+                if live_spread > 0:
+                    spread_note += " (WTI premium — unusual, suggests domestic supply tightness)"
+                else:
+                    spread_note += " (Brent premium — standard during global supply disruptions)"
+                if abs(live_spread) > 5:
+                    spread_note += f". |Spread| > $5 = geopolitical supply disruption signal."
+                divergence_lines.append(spread_note)
+
+            # Dollar
+            live_dxy = lp.get("dxy")
+            fred_dxy = regime_dict.get("components", {}).get("cross_asset", {}).get("dollar", {}).get("dxy")
+            if live_dxy is not None and fred_dxy is not None and abs(live_dxy - fred_dxy) > 1.0:
+                divergence_lines.append(
+                    f"Dollar/DXY: FRED={fred_dxy:.2f}, Live={live_dxy:.2f}. USE LIVE VALUE."
+                )
+
+            # Gold and SPX (informational, always show if available)
+            live_gold = lp.get("gold")
+            if live_gold is not None:
+                divergence_lines.append(f"Gold (live): ${live_gold:.2f}")
+
+            live_spx = lp.get("spx")
+            if live_spx is not None:
+                divergence_lines.append(f"S&P 500 (live): {live_spx:.2f}")
+
+            # SKEW (always show — not available from FRED)
+            live_skew = lp.get("skew")
+            if live_skew is not None:
+                skew_label = ("complacent" if live_skew < 120 else "normal" if live_skew < 135
+                             else "elevated" if live_skew < 150 else "extreme")
+                divergence_lines.append(
+                    f"CBOE SKEW (live): {live_skew:.0f} ({skew_label} tail risk hedging)"
+                )
+
+            if divergence_lines:
+                notes.append(
+                    "- LIVE MARKET PRICES (yfinance, current session) — "
+                    "these supersede stale FRED values when they differ materially. "
+                    "USE LIVE VALUES in your analysis:\n    "
+                    + "\n    ".join(divergence_lines)
+                )
 
         # --- Business Cycle: Custom Leading Indicator ---
         bc = regime_dict.get("components", {}).get("business_cycle", {})
@@ -1297,7 +1395,7 @@ class MacroStrategist(BaseAgent):
                 SELECT id, vix_level, sahm_value, hy_spread, core_pce_yoy,
                        net_liquidity_trillion, fed_funds_rate, nfci,
                        composite_score, stress_index, binding_constraint,
-                       primary_regime, assessed_at
+                       primary_regime, assessed_at, full_regime_json
                 FROM regime_assessments
                 ORDER BY id DESC LIMIT 5
                 """
@@ -1436,6 +1534,32 @@ class MacroStrategist(BaseAgent):
                 context_lines.append(f"  Regime: {unique_regimes[0]} (stable across all assessments)")
             else:
                 context_lines.append(f"  Regime sequence: {' → '.join(unique_regimes)}")
+
+        # SKEW history from full_regime_json (yfinance-sourced, stored in volatility component)
+        skew_values = []
+        for r in rows:
+            try:
+                frj = r.get("full_regime_json")
+                if frj:
+                    if isinstance(frj, str):
+                        frj = json.loads(frj)
+                    skew_val = frj.get("components", {}).get("volatility", {}).get("skew", {}).get("current")
+                    if skew_val is not None:
+                        skew_values.append(float(skew_val))
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+                pass
+
+        if len(skew_values) >= 2:
+            skew_strs = [f"{v:.0f}" for v in skew_values]
+            skew_dir = "rising" if skew_values[-1] > skew_values[0] + 2 else "falling" if skew_values[-1] < skew_values[0] - 2 else "stable"
+            context_lines.append(f"  SKEW: {' → '.join(skew_strs)} ({skew_dir})")
+
+            if abs(skew_values[-1] - skew_values[0]) > 10:
+                significant_changes.append(
+                    f"SKEW {'rose' if skew_values[-1] > skew_values[0] else 'fell'} "
+                    f"from {skew_values[0]:.0f} to {skew_values[-1]:.0f} — "
+                    f"{'institutions increasing' if skew_values[-1] > skew_values[0] else 'institutions reducing'} tail hedging"
+                )
 
         # Summary of significant changes
         if significant_changes:

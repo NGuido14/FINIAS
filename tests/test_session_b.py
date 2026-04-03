@@ -15,7 +15,9 @@ class TestGroundTruthModule:
         from finias.data.providers.fred_client import MACRO_SERIES
         assert "SAHMREALTIME" in MACRO_SERIES
         assert "T10Y2Y" in MACRO_SERIES
-        assert "SKEW" in MACRO_SERIES
+        # SKEW moved to yfinance live price feed (no longer in MACRO_SERIES)
+        from finias.data.providers.price_feed import LIVE_INSTRUMENTS
+        assert "skew" in LIVE_INSTRUMENTS
 
 
 class TestBrentIntegration:
