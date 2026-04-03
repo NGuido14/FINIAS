@@ -1,0 +1,56 @@
+{
+  "model_version": "1.0",
+  "model_type": "logistic_regression_l2",
+  "training_period": "1982-01-01 to 2020-01-01",
+  "validation_period": "2020-01-01 to 2026-01-01",
+  "n_train": 456,
+  "n_validation": 72,
+  "n_recession_months_train": 45,
+  "n_recession_months_val": 2,
+  "base_rate": 0.0987,
+  "regularization_C": 0.046416,
+  "intercept": -3.209845,
+  "coefficients": {
+    "sahm_value": 0.11742,
+    "yield_curve_3m10y": -0.069012,
+    "claims_yoy_pct": 0.951418,
+    "permits_yoy_pct": -0.308172,
+    "consumer_sentiment": -0.612578,
+    "indpro_yoy_pct": -0.335285
+  },
+  "feature_means": {
+    "sahm_value": 0.313011,
+    "yield_curve_3m10y": 1.776391,
+    "claims_yoy_pct": -0.549496,
+    "permits_yoy_pct": 2.938246,
+    "consumer_sentiment": 88.014474,
+    "indpro_yoy_pct": 1.931535
+  },
+  "feature_stds": {
+    "sahm_value": 0.747798,
+    "yield_curve_3m10y": 1.109846,
+    "claims_yoy_pct": 17.481383,
+    "permits_yoy_pct": 20.230972,
+    "consumer_sentiment": 11.786452,
+    "indpro_yoy_pct": 4.064765
+  },
+  "train_auc": 0.9919,
+  "train_brier": 0.029,
+  "validation_auc": 0.9929,
+  "validation_brier": 0.164,
+  "feature_descriptions": {
+    "sahm_value": "Sahm Rule: 3m avg unemployment rise above 12m low of 3m averages",
+    "yield_curve_3m10y": "10Y minus 3M Treasury spread (negative = inverted)",
+    "claims_yoy_pct": "Initial claims 4-week avg, YoY % change (positive = rising claims)",
+    "permits_yoy_pct": "Building permits YoY % change (negative = declining permits)",
+    "consumer_sentiment": "U. Michigan Consumer Sentiment Index level",
+    "indpro_yoy_pct": "Industrial production YoY % change (negative = contracting)"
+  },
+  "notes": [
+    "Trained on pre-COVID data (1982-2019) to avoid contamination from exogenous shock.",
+    "COVID recession (Feb-Apr 2020) is in validation set \u2014 model may not detect it because COVID had zero classic leading indicator deterioration before onset.",
+    "Class weight 'balanced' used to handle 13% recession base rate.",
+    "Features standardized using training-period means and stds.",
+    "At runtime, missing features contribute 0 (at-mean assumption)."
+  ]
+}

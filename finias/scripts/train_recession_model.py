@@ -301,11 +301,10 @@ async def main():
         sys.exit(1)
 
     model = LogisticRegressionCV(
-        Cs=10,                    # Test 10 regularization strengths
-        cv=5,                     # 5-fold cross-validation
-        penalty="l2",             # L2 regularization
-        class_weight="balanced",  # Handle class imbalance (13% recession)
-        scoring="roc_auc",        # Optimize for AUC
+        Cs=10,  # Test 10 regularization strengths
+        cv=5,  # 5-fold cross-validation
+        l1_ratios=(0,),  # Pure L2 regularization (new sklearn API)
+        scoring="roc_auc",  # Optimize for AUC
         max_iter=1000,
         random_state=42,
     )
