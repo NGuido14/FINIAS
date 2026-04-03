@@ -108,3 +108,201 @@ def test_macro_analysis_prompt_has_temporal_guidance():
     assert "PRIOR ASSESSMENT CONTINUITY" in MACRO_ANALYSIS_PROMPT
     assert "inflection points" in MACRO_ANALYSIS_PROMPT
     assert "materialized" in MACRO_ANALYSIS_PROMPT
+
+
+class TestInterpretationValidation:
+    """Tests for post-hoc interpretation validation."""
+
+    def _make_regime(self):
+        """Create a minimal regime assessment for testing."""
+        from finias.agents.macro_strategist.computations.regime import RegimeAssessment
+        from finias.core.agents.models import MarketRegime
+        return RegimeAssessment(
+            primary_regime=MarketRegime.TRANSITION,
+            composite_score=-0.023,
+            binding_constraint="inflation",
+            key_levels={
+                "vix": 25.25,
+                "core_pce_yoy": 3.06,
+                "core_pce_3m_ann": 3.66,
+                "hy_spread": 3.28,
+                "fed_funds": 3.64,
+                "sahm_value": 0.267,
+                "net_liquidity": 5782000,
+            },
+            trajectory={
+                "forward_bias": {"bias": "neutral", "score": 0.0, "confidence": "moderate"},
+            },
+        )
+
+    def test_validation_corrects_binding_constraint(self):
+        """Fabricated binding constraint should be auto-corrected."""
+        from finias.agents.macro_strategist.agent import MacroStrategist
+
+        regime = self._make_regime()
+        interp = {
+            "summary": "Test summary",
+            "key_findings": ["a"],
+            "risks": ["b"],
+            "watch_items": ["c"],
+            "macro_regime": "Transition",
+            "binding_constraint": "market signals",  # WRONG — should be "inflation"
+            "key_metrics": {"forward_bias": "neutral", "composite_score": -0.023},
+        }
+
+        # Create a minimal MacroStrategist-like object to call the method
+        class MockAgent:
+            _validate_interpretation = MacroStrategist._validate_interpretation
+
+        agent = MockAgent()
+        result = agent._validate_interpretation(interp, regime)
+
+        assert result["binding_constraint"] == "inflation"
+        assert result["_validation"]["corrected"] > 0
+        assert any(c["field"] == "binding_constraint" for c in result["_validation"]["corrections"])
+
+    def test_validation_passes_correct_binding(self):
+        """Correct binding constraint should pass."""
+        from finias.agents.macro_strategist.agent import MacroStrategist
+
+        regime = self._make_regime()
+        interp = {
+            "summary": "Test",
+            "key_findings": [],
+            "risks": [],
+            "watch_items": [],
+            "macro_regime": "Transition",
+            "binding_constraint": "Inflation persistence",  # Contains "inflation" — passes
+            "key_metrics": {"forward_bias": "neutral", "composite_score": -0.023},
+        }
+
+        class MockAgent:
+            _validate_interpretation = MacroStrategist._validate_interpretation
+
+        agent = MockAgent()
+        result = agent._validate_interpretation(interp, regime)
+
+        # Should NOT be corrected — "Inflation persistence" contains "inflation"
+        assert not any(c["field"] == "binding_constraint" for c in result["_validation"]["corrections"])
+
+    def test_validation_corrects_forward_bias(self):
+        """Wrong forward_bias should be auto-corrected."""
+        from finias.agents.macro_strategist.agent import MacroStrategist
+
+        regime = self._make_regime()
+        interp = {
+            "summary": "Test",
+            "key_findings": [],
+            "risks": [],
+            "watch_items": [],
+            "macro_regime": "Transition",
+            "binding_constraint": "inflation",
+            "key_metrics": {"forward_bias": "constructive", "composite_score": -0.023},  # WRONG
+        }
+
+        class MockAgent:
+            _validate_interpretation = MacroStrategist._validate_interpretation
+
+        agent = MockAgent()
+        result = agent._validate_interpretation(interp, regime)
+
+        assert result["key_metrics"]["forward_bias"] == "neutral"
+        assert any(c["field"] == "key_metrics.forward_bias" for c in result["_validation"]["corrections"])
+
+    def test_validation_flags_wrong_vix(self):
+        """VIX that doesn't match FRED or live should be flagged."""
+        from finias.agents.macro_strategist.agent import MacroStrategist
+
+        regime = self._make_regime()
+        interp = {
+            "summary": "Test",
+            "key_findings": [],
+            "risks": [],
+            "watch_items": [],
+            "macro_regime": "Transition",
+            "binding_constraint": "inflation",
+            "key_metrics": {"vix": 35.0},  # Way off from 25.25
+        }
+
+        class MockAgent:
+            _validate_interpretation = MacroStrategist._validate_interpretation
+
+        agent = MockAgent()
+        result = agent._validate_interpretation(interp, regime, live_prices={"vix": 23.87})
+
+        assert any(w["field"] == "key_metrics.vix" for w in result["_validation"]["warnings"])
+
+    def test_validation_accepts_live_vix(self):
+        """VIX matching the live price should pass even if FRED differs."""
+        from finias.agents.macro_strategist.agent import MacroStrategist
+
+        regime = self._make_regime()  # FRED VIX = 25.25
+        interp = {
+            "summary": "Test",
+            "key_findings": [],
+            "risks": [],
+            "watch_items": [],
+            "macro_regime": "Transition",
+            "binding_constraint": "inflation",
+            "key_metrics": {"vix": 24.0},  # Close to live 23.87, not FRED 25.25
+        }
+
+        class MockAgent:
+            _validate_interpretation = MacroStrategist._validate_interpretation
+
+        agent = MockAgent()
+        result = agent._validate_interpretation(interp, regime, live_prices={"vix": 23.87})
+
+        # Should pass — 24.0 is within tolerance of live 23.87
+        assert not any(w["field"] == "key_metrics.vix" for w in result["_validation"]["warnings"])
+
+    def test_validation_produces_audit_trail(self):
+        """Validation should always produce a _validation field."""
+        from finias.agents.macro_strategist.agent import MacroStrategist
+
+        regime = self._make_regime()
+        interp = {
+            "summary": "Test",
+            "key_findings": [],
+            "risks": [],
+            "watch_items": [],
+            "macro_regime": "Transition",
+            "binding_constraint": "inflation",
+            "key_metrics": {},
+        }
+
+        class MockAgent:
+            _validate_interpretation = MacroStrategist._validate_interpretation
+
+        agent = MockAgent()
+        result = agent._validate_interpretation(interp, regime)
+
+        assert "_validation" in result
+        assert "validated_at" in result["_validation"]
+        assert "corrections" in result["_validation"]
+        assert "warnings" in result["_validation"]
+        assert "passed" in result["_validation"]
+        assert "total_checks" in result["_validation"]
+
+    def test_validation_flags_regime_mismatch(self):
+        """macro_regime not containing computed regime should be flagged."""
+        from finias.agents.macro_strategist.agent import MacroStrategist
+
+        regime = self._make_regime()  # primary_regime = TRANSITION
+        interp = {
+            "summary": "Test",
+            "key_findings": [],
+            "risks": [],
+            "watch_items": [],
+            "macro_regime": "Risk-Off Crisis",  # Doesn't contain "transition"
+            "binding_constraint": "inflation",
+            "key_metrics": {},
+        }
+
+        class MockAgent:
+            _validate_interpretation = MacroStrategist._validate_interpretation
+
+        agent = MockAgent()
+        result = agent._validate_interpretation(interp, regime)
+
+        assert any(w["field"] == "macro_regime" for w in result["_validation"]["warnings"])

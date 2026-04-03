@@ -19,6 +19,7 @@ What it checks:
 """
 
 import asyncio
+import json
 import sys
 import os
 from datetime import date, timedelta, datetime, timezone
@@ -735,6 +736,61 @@ async def check_ground_truth(db: DatabasePool, fred: FredClient):
         print(f"  ⚠ Ground-truth validation failed: {e}")
 
 
+async def check_interpretation_validation(db: DatabasePool):
+    # === Section 8: Interpretation Validation History ===
+    print("\n" + "=" * 60)
+    print("  8. INTERPRETATION VALIDATION HISTORY (last 5)")
+    print("=" * 60)
+    try:
+        val_rows = await db.fetch(
+            """
+            SELECT id, assessed_at, interpretation_json
+            FROM regime_assessments
+            WHERE interpretation_json IS NOT NULL
+            ORDER BY id DESC LIMIT 5
+            """
+        )
+
+        total_corrections = 0
+        total_warnings = 0
+        total_passed = 0
+
+        for row in val_rows:
+            try:
+                interp = json.loads(row["interpretation_json"]) if isinstance(row["interpretation_json"], str) else row["interpretation_json"]
+                val = interp.get("_validation", {})
+                if val:
+                    corr = val.get("corrected", 0)
+                    warn = val.get("warned", 0)
+                    passed = val.get("passed", 0)
+                    total = val.get("total_checks", 0)
+                    total_corrections += corr
+                    total_warnings += warn
+                    total_passed += passed
+
+                    status = "✓" if corr == 0 and warn == 0 else "⚠" if corr == 0 else "✗"
+                    print(f"  {status} Row {row['id']} ({row['assessed_at']}): "
+                          f"{passed} passed, {corr} corrected, {warn} warned / {total} checks")
+
+                    for c in val.get("corrections", []):
+                        print(f"      CORRECTED: {c['field']}: '{c.get('claude_value', '')}' → '{c.get('computed_value', '')}'")
+                    for w in val.get("warnings", []):
+                        print(f"      WARNING: {w['field']}: {w.get('note', '')}")
+                else:
+                    print(f"  - Row {row['id']}: No validation data (pre-validation assessment)")
+            except (json.JSONDecodeError, TypeError, KeyError):
+                print(f"  - Row {row['id']}: Could not parse interpretation")
+
+        if total_corrections + total_warnings + total_passed > 0:
+            total_all = total_corrections + total_warnings + total_passed
+            print(f"\n  Summary: {total_passed}/{total_all} passed, "
+                  f"{total_corrections} corrections, {total_warnings} warnings")
+            if total_corrections > 0:
+                print(f"  ⚠ Claude required {total_corrections} corrections across {len(val_rows)} assessments")
+    except Exception as e:
+        print(f"  ⚠ Could not fetch validation history: {e}")
+
+
 async def table_usage_summary(db: DatabasePool):
     header("6. TABLE USAGE SUMMARY & RECOMMENDATIONS")
 
@@ -784,6 +840,7 @@ async def main():
         await check_matrix(db)
         await check_computations(cache)
         await check_ground_truth(db, fred)
+        await check_interpretation_validation(db)
         await table_usage_summary(db)
 
         # Cleanup

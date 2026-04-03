@@ -658,6 +658,20 @@ class MacroStrategist(BaseAgent):
         # === Claude interpretation ===
         interpretation = await self._interpret(regime_assessment, query.question)
 
+        # === Validate interpretation against computed data ===
+        interpretation = self._validate_interpretation(
+            interpretation,
+            regime_assessment,
+            live_prices=getattr(self, '_live_prices', None),
+        )
+
+        # Prepend binding constraint to summary (after validation may have corrected it)
+        if interpretation.get("binding_constraint") and interpretation["binding_constraint"] not in interpretation.get("summary", ""):
+            interpretation["summary"] = (
+                f"Binding constraint: {interpretation['binding_constraint']}. "
+                + interpretation.get("summary", "")
+            )
+
         # === Publish to shared state (Redis) ===
         regime_dict = regime_assessment.to_dict()
         # Strip citation tags before publishing
@@ -876,12 +890,7 @@ class MacroStrategist(BaseAgent):
         result.setdefault("binding_constraint", "")
         result.setdefault("key_metrics", {})
 
-        # Prepend binding constraint to summary for downstream visibility
-        if result["binding_constraint"] and result["binding_constraint"] not in result["summary"]:
-            result["summary"] = (
-                f"Binding constraint: {result['binding_constraint']}. "
-                + result["summary"]
-            )
+        # NOTE: binding_constraint prepend moved to query() — runs AFTER validation
 
         return result
 
@@ -1656,6 +1665,244 @@ class MacroStrategist(BaseAgent):
         )
 
         return "\n".join(lines) + "\n\n"
+
+    def _validate_interpretation(self, interpretation: dict, regime_assessment, live_prices: dict = None) -> dict:
+        """
+        Post-hoc validation of Claude's interpretation against computed data.
+
+        Compares Claude's claimed values against the authoritative computed
+        regime data. Auto-corrects fields where the computed value is
+        definitively correct (binding_constraint, forward_bias). Flags
+        fields that are suspicious but may have valid explanations (Claude
+        may use live prices from web search instead of FRED values).
+
+        Produces a _validation audit trail stored with the interpretation
+        for tracking fabrication frequency over time.
+
+        This is pure Python comparison — zero API calls, <1ms execution.
+
+        Args:
+            interpretation: The parsed interpretation dict from _interpret()
+            regime_assessment: The computed RegimeAssessment object
+            live_prices: Optional dict of yfinance live prices for dual-source checking
+
+        Returns:
+            The interpretation dict, potentially modified, with _validation field added
+        """
+        if not interpretation or not interpretation.get("summary"):
+            return interpretation
+
+        lp = live_prices or {}
+        kl = regime_assessment.key_levels or {}
+        traj = regime_assessment.trajectory or {}
+        forward_bias_data = traj.get("forward_bias", {})
+        metrics = interpretation.get("key_metrics", {})
+
+        corrections = []
+        warnings = []
+        passed = 0
+
+        # === TIER 1: Auto-correct (computed value is definitively correct) ===
+
+        # 1. Binding constraint
+        computed_binding = regime_assessment.binding_constraint
+        claude_binding = interpretation.get("binding_constraint", "")
+        if computed_binding and claude_binding:
+            # Fuzzy match: Claude writes "Inflation persistence", computed says "inflation"
+            if computed_binding.lower() not in claude_binding.lower():
+                corrections.append({
+                    "field": "binding_constraint",
+                    "claude_value": claude_binding,
+                    "computed_value": computed_binding,
+                    "action": "corrected",
+                })
+                interpretation["binding_constraint"] = computed_binding
+                logger.warning(
+                    f"VALIDATION: Corrected binding_constraint from "
+                    f"'{claude_binding}' to '{computed_binding}'"
+                )
+            else:
+                passed += 1
+
+        # 2. Forward bias in key_metrics
+        computed_bias = forward_bias_data.get("bias", "neutral")
+        claude_bias = metrics.get("forward_bias", "")
+        if claude_bias and computed_bias:
+            if claude_bias.lower().strip() != computed_bias.lower().strip():
+                corrections.append({
+                    "field": "key_metrics.forward_bias",
+                    "claude_value": claude_bias,
+                    "computed_value": computed_bias,
+                    "action": "corrected",
+                })
+                metrics["forward_bias"] = computed_bias
+                logger.warning(
+                    f"VALIDATION: Corrected forward_bias from "
+                    f"'{claude_bias}' to '{computed_bias}'"
+                )
+            else:
+                passed += 1
+
+        # 3. Composite score in key_metrics
+        computed_composite = regime_assessment.composite_score
+        claude_composite = metrics.get("composite_score")
+        if claude_composite is not None and computed_composite is not None:
+            try:
+                claude_val = float(claude_composite)
+                if abs(claude_val - computed_composite) > 0.02:
+                    corrections.append({
+                        "field": "key_metrics.composite_score",
+                        "claude_value": claude_val,
+                        "computed_value": round(computed_composite, 3),
+                        "action": "corrected",
+                    })
+                    metrics["composite_score"] = round(computed_composite, 3)
+                    logger.warning(
+                        f"VALIDATION: Corrected composite_score from "
+                        f"{claude_val} to {computed_composite:.3f}"
+                    )
+                else:
+                    passed += 1
+            except (ValueError, TypeError):
+                warnings.append({
+                    "field": "key_metrics.composite_score",
+                    "claude_value": str(claude_composite),
+                    "note": "Non-numeric value",
+                    "action": "flagged",
+                })
+
+        # === TIER 2: Tolerance checks with dual-source validation ===
+
+        # Helper for dual-source checking
+        def _check_metric(field_name, claude_val, fred_val, live_val, tolerance, unit=""):
+            nonlocal passed
+            if claude_val is None:
+                return  # Claude didn't provide this metric
+            try:
+                cv = float(claude_val)
+            except (ValueError, TypeError):
+                warnings.append({
+                    "field": f"key_metrics.{field_name}",
+                    "claude_value": str(claude_val),
+                    "note": "Non-numeric value",
+                    "action": "flagged",
+                })
+                return
+
+            # Check against FRED value
+            fred_match = fred_val is not None and abs(cv - fred_val) <= tolerance
+            # Check against live value
+            live_match = live_val is not None and abs(cv - live_val) <= tolerance
+
+            if fred_match or live_match:
+                passed += 1
+            else:
+                note_parts = []
+                if fred_val is not None:
+                    note_parts.append(f"FRED={fred_val}{unit}")
+                if live_val is not None:
+                    note_parts.append(f"live={live_val}{unit}")
+                warnings.append({
+                    "field": f"key_metrics.{field_name}",
+                    "claude_value": cv,
+                    "computed_value": fred_val,
+                    "live_value": live_val,
+                    "tolerance": tolerance,
+                    "action": "flagged",
+                    "note": f"Does not match {' or '.join(note_parts)} within tolerance {tolerance}",
+                })
+                logger.warning(
+                    f"VALIDATION: key_metrics.{field_name}={cv} does not match "
+                    f"FRED={fred_val} or live={live_val} (tolerance={tolerance})"
+                )
+
+        # VIX — accept either FRED or live
+        _check_metric("vix", metrics.get("vix"),
+                      kl.get("vix"), lp.get("vix"), tolerance=2.0)
+
+        # Core PCE YoY — FRED only (no live equivalent)
+        _check_metric("core_pce_yoy", metrics.get("core_pce_yoy"),
+                      kl.get("core_pce_yoy"), None, tolerance=0.05, unit="%")
+
+        # Core PCE 3m annualized — FRED only
+        _check_metric("core_pce_3m_annualized", metrics.get("core_pce_3m_annualized"),
+                      kl.get("core_pce_3m_ann"), None, tolerance=0.05, unit="%")
+
+        # HY Spread — FRED only
+        _check_metric("hy_spread", metrics.get("hy_spread"),
+                      kl.get("hy_spread"), None, tolerance=0.1, unit="%")
+
+        # Oil WTI — accept either FRED or live
+        fred_oil = None
+        oil_dict = regime_assessment.cross_asset if isinstance(regime_assessment.cross_asset, dict) else {}
+        if isinstance(oil_dict, dict):
+            fred_oil = oil_dict.get("oil", {}).get("wti_price") if isinstance(oil_dict.get("oil"), dict) else None
+        if fred_oil is None:
+            fred_oil = kl.get("oil_wti")
+        _check_metric("oil_wti", metrics.get("oil_wti"),
+                      fred_oil, lp.get("wti"), tolerance=3.0, unit="$")
+
+        # Fed Funds — FRED only
+        _check_metric("fed_funds", metrics.get("fed_funds"),
+                      kl.get("fed_funds"), None, tolerance=0.05, unit="%")
+
+        # Sahm — FRED only, tight tolerance
+        _check_metric("sahm_value", metrics.get("sahm_value"),
+                      kl.get("sahm_value"), None, tolerance=0.005)
+
+        # Net Liquidity — FRED only
+        computed_net_liq_t = None
+        net_liq_raw = kl.get("net_liquidity")
+        if net_liq_raw is not None:
+            computed_net_liq_t = net_liq_raw / 1_000_000 if net_liq_raw > 1000 else net_liq_raw
+        _check_metric("net_liquidity_trillion", metrics.get("net_liquidity_trillion"),
+                      computed_net_liq_t, None, tolerance=0.05, unit="T")
+
+        # === TIER 3: Qualitative check — regime alignment ===
+
+        computed_regime = regime_assessment.primary_regime.value
+        claude_regime = interpretation.get("macro_regime", "")
+        if computed_regime and claude_regime:
+            if computed_regime.lower() in claude_regime.lower():
+                passed += 1
+            else:
+                warnings.append({
+                    "field": "macro_regime",
+                    "claude_value": claude_regime,
+                    "computed_value": computed_regime,
+                    "action": "flagged",
+                    "note": f"Computed regime '{computed_regime}' not found in Claude's regime description",
+                })
+                logger.warning(
+                    f"VALIDATION: macro_regime '{claude_regime}' does not contain "
+                    f"computed regime '{computed_regime}'"
+                )
+
+        # === Build validation summary ===
+        from datetime import datetime, timezone
+        interpretation["_validation"] = {
+            "validated_at": datetime.now(timezone.utc).isoformat(),
+            "corrections": corrections,
+            "warnings": warnings,
+            "passed": passed,
+            "corrected": len(corrections),
+            "warned": len(warnings),
+            "total_checks": passed + len(corrections) + len(warnings),
+        }
+
+        if corrections:
+            logger.info(
+                f"VALIDATION COMPLETE: {passed} passed, {len(corrections)} corrected, "
+                f"{len(warnings)} warned. Corrections: "
+                f"{', '.join(c['field'] for c in corrections)}"
+            )
+        else:
+            logger.info(
+                f"VALIDATION COMPLETE: {passed} passed, 0 corrected, "
+                f"{len(warnings)} warned."
+            )
+
+        return interpretation
 
     def _regime_to_direction(self, regime: MarketRegime, score: float) -> SignalDirection:
         """
