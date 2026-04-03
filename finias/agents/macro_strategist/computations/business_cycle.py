@@ -18,6 +18,7 @@ All computation is pure Python. No API calls. No Claude.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 import numpy as np
 
@@ -54,6 +55,7 @@ class BusinessCycleAnalysis:
     # Labor leading signals
     initial_claims_4wk: Optional[float] = None
     initial_claims_trend: str = "unknown"
+    initial_claims_yoy_pct: Optional[float] = None  # YoY % change of 4-week avg
     continuing_claims: Optional[float] = None
     continuing_claims_trend: str = "unknown"
     jolts_openings: Optional[float] = None
@@ -64,6 +66,7 @@ class BusinessCycleAnalysis:
 
     # Housing
     building_permits_trend: str = "unknown"
+    building_permits_yoy_pct: Optional[float] = None  # YoY % change
     housing_starts_trend: str = "unknown"
 
     # Consumer
@@ -116,6 +119,7 @@ class BusinessCycleAnalysis:
             "labor_leading": {
                 "initial_claims_4wk": self.initial_claims_4wk,
                 "initial_claims_trend": self.initial_claims_trend,
+                "initial_claims_yoy_pct": self.initial_claims_yoy_pct,
                 "continuing_claims": self.continuing_claims,
                 "continuing_claims_trend": self.continuing_claims_trend,
                 "jolts_openings": self.jolts_openings,
@@ -125,6 +129,7 @@ class BusinessCycleAnalysis:
             },
             "housing": {
                 "permits_trend": self.building_permits_trend,
+                "permits_yoy_pct": self.building_permits_yoy_pct,
                 "starts_trend": self.housing_starts_trend,
             },
             "consumer": {
@@ -141,6 +146,9 @@ class BusinessCycleAnalysis:
             },
             "composite_leading": self.composite_leading,
             "recession_probability": self.recession_probability,
+            "_recession_model": "calibrated_logistic" if Path(__file__).parent.parent.joinpath(
+                "models", "recession_coefficients.json"
+            ).exists() else "heuristic_fallback",
             "favored_sectors": self.favored_sectors,
             "disfavored_sectors": self.disfavored_sectors,
             "factor_regime": self.factor_regime,
@@ -168,6 +176,7 @@ def analyze_business_cycle(
     nfp_series: list[dict],
     philly_fed: list[dict],
     gdp_nowcast_series: list[dict] = None,
+    yield_curve_slope: float = None,
 ) -> BusinessCycleAnalysis:
     """Perform complete business cycle analysis."""
 
@@ -273,6 +282,17 @@ def analyze_business_cycle(
     if initial_claims:
         result.initial_claims_4wk = _moving_average(initial_claims, 4)
         result.initial_claims_trend = _classify_claims_trend(initial_claims)
+
+    # Compute initial claims YoY % change for recession model
+    if initial_claims and len(initial_claims) >= 52:
+        # Claims are weekly — compute 4-week average for current and year-ago
+        recent_4wk = np.mean([c["value"] for c in initial_claims[-4:]])
+        year_ago_4wk = np.mean([c["value"] for c in initial_claims[-56:-52]])
+        if year_ago_4wk > 0:
+            result.initial_claims_yoy_pct = round(
+                (recent_4wk / year_ago_4wk - 1) * 100, 2
+            )
+
     if continuing_claims:
         result.continuing_claims = _latest(continuing_claims)
         result.continuing_claims_trend = _classify_trend_simple(continuing_claims, 8)
@@ -290,6 +310,15 @@ def analyze_business_cycle(
     result.building_permits_trend = _classify_trend_simple(building_permits, 3)
     result.housing_starts_trend = _classify_trend_simple(housing_starts, 3)
 
+    # Compute permits YoY % change for recession model
+    if building_permits and len(building_permits) >= 13:
+        current_permits = building_permits[-1]["value"]
+        year_ago_permits = building_permits[-13]["value"]
+        if year_ago_permits > 0:
+            result.building_permits_yoy_pct = round(
+                (current_permits / year_ago_permits - 1) * 100, 2
+            )
+
     # --- Consumer ---
     result.retail_sales_yoy = _compute_yoy(retail_sales)
     if consumer_sentiment:
@@ -305,7 +334,7 @@ def analyze_business_cycle(
     result.composite_leading = _compute_composite_leading(result)
 
     # --- Recession Probability ---
-    result.recession_probability = _compute_recession_probability(result)
+    result.recession_probability = _compute_recession_probability(result, yield_curve_slope=yield_curve_slope)
 
     # --- Cycle Phase Classification ---
     result.cycle_phase, result.phase_confidence = _classify_cycle_phase(result)
@@ -543,38 +572,60 @@ def _compute_composite_leading(result: BusinessCycleAnalysis) -> float:
     return sum(s * w for s, w in zip(scores, weights)) / total_weight
 
 
-def _compute_recession_probability(result: BusinessCycleAnalysis) -> float:
+def _compute_recession_probability(result: BusinessCycleAnalysis, yield_curve_slope: float = None) -> float:
     """
-    Composite recession probability from multiple indicators.
+    Recession probability from calibrated logistic model.
+
+    Uses a logistic regression model trained on 50+ years of FRED data
+    against NBER recession dates. The model produces genuinely calibrated
+    probabilities — when it outputs 0.15, that means recessions occurred
+    15% of the time historically under similar conditions.
+
+    Falls back to a heuristic if the model coefficients haven't been
+    trained yet (run finias.scripts.train_recession_model).
+
+    Args:
+        result: BusinessCycleAnalysis with computed indicator values
+        yield_curve_slope: 10Y minus 3M Treasury spread (from YieldCurveAnalysis)
     """
+    from finias.agents.macro_strategist.models.recession_model import predict_recession_probability
+
+    prob = predict_recession_probability(
+        sahm_value=result.sahm_value,
+        yield_curve_3m10y=yield_curve_slope,
+        claims_yoy_pct=result.initial_claims_yoy_pct,
+        permits_yoy_pct=result.building_permits_yoy_pct,
+        consumer_sentiment=result.consumer_sentiment,
+        indpro_yoy_pct=result.industrial_production_yoy,
+    )
+
+    if prob is not None:
+        return prob
+
+    # Fallback: original heuristic if model not trained yet
     prob = 0.0
 
-    # Sahm Rule (most reliable single indicator)
     if result.sahm_triggered:
-        prob += 0.50  # If triggered, minimum 50% probability
+        prob += 0.50
     elif result.sahm_value > 0.35:
         prob += 0.25
     elif result.sahm_value > 0.25:
         prob += 0.10
 
-    # LEI
     if result.lei_consecutive_negatives >= 6:
         prob += 0.20
     elif result.lei_consecutive_negatives >= 3:
         prob += 0.10
 
-    # ISM
     if result.ism_manufacturing is not None:
         if result.ism_manufacturing < 45:
             prob += 0.15
         elif result.ism_manufacturing < 48:
             prob += 0.08
 
-    # Claims
     if result.initial_claims_trend == "rising":
         prob += 0.08
 
-    # CFNAI (below -0.7 = recession territory per Chicago Fed)
     if result.cfnai is not None and result.cfnai < -0.70:
         prob += 0.12
 

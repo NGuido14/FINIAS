@@ -511,6 +511,7 @@ class MacroStrategist(BaseAgent):
                 nfp_series=fred_data.get("PAYEMS", []),
                 philly_fed=fred_data.get("GACDFSA066MSFRBPHI", []),
                 gdp_nowcast_series=fred_data.get("GDPNOW", []),
+                yield_curve_slope=yc_analysis.spread_3m10y,
             )
         except Exception as e:
             logger.error(f"Business cycle computation failed: {e}")

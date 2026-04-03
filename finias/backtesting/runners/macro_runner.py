@@ -226,6 +226,7 @@ async def main():
                     nfp_series=fred_as_of.get("PAYEMS", []),
                     philly_fed=fred_as_of.get("GACDFSA066MSFRBPHI", []),
                     gdp_nowcast_series=fred_as_of.get("GDPNOW", []),
+                    yield_curve_slope=yc.spread_3m10y if yc else None,
                 )
 
                 # 5. Inflation

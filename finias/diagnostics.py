@@ -440,6 +440,7 @@ async def check_computations(cache: MarketDataCache):
             nfp_series=bc_series["PAYEMS"],
             philly_fed=bc_series["GACDFSA066MSFRBPHI"],
             gdp_nowcast_series=bc_series.get("GDPNOW", []),
+            yield_curve_slope=yc.spread_3m10y if yc else None,
         )
         ok(f"Business Cycle: phase={cycle.cycle_phase}, confidence={cycle.phase_confidence:.2f}, "
            f"sahm={cycle.sahm_value:.3f}, triggered={cycle.sahm_triggered}, "
