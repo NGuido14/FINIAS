@@ -22,7 +22,7 @@ Features (6):
   2. yield_curve_3m10y — 10Y minus 3M Treasury spread
   3. claims_yoy_pct — Initial claims YoY % change
   4. permits_yoy_pct — Building permits YoY % change
-  5. consumer_sentiment — University of Michigan sentiment level
+  5. sentiment_yoy_pct — University of Michigan sentiment YoY % change
   6. indpro_yoy_pct — Industrial production YoY % change
 
 No sklearn dependency. No numpy dependency. Just math.exp().
@@ -76,7 +76,7 @@ def predict_recession_probability(
     yield_curve_3m10y: Optional[float] = None,
     claims_yoy_pct: Optional[float] = None,
     permits_yoy_pct: Optional[float] = None,
-    consumer_sentiment: Optional[float] = None,
+    sentiment_yoy_pct: Optional[float] = None,
     indpro_yoy_pct: Optional[float] = None,
 ) -> Optional[float]:
     """
@@ -93,7 +93,7 @@ def predict_recession_probability(
         yield_curve_3m10y: 10Y minus 3M Treasury spread (negative = inverted)
         claims_yoy_pct: Initial claims 4-week average, YoY % change
         permits_yoy_pct: Building permits YoY % change
-        consumer_sentiment: University of Michigan Consumer Sentiment level
+        sentiment_yoy_pct: University of Michigan Consumer Sentiment YoY % change
         indpro_yoy_pct: Industrial production YoY % change
 
     Returns:
@@ -114,7 +114,7 @@ def predict_recession_probability(
         "yield_curve_3m10y": yield_curve_3m10y,
         "claims_yoy_pct": claims_yoy_pct,
         "permits_yoy_pct": permits_yoy_pct,
-        "consumer_sentiment": consumer_sentiment,
+        "sentiment_yoy_pct": sentiment_yoy_pct,
         "indpro_yoy_pct": indpro_yoy_pct,
     }
 

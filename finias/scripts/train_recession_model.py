@@ -203,9 +203,9 @@ async def main():
     permits_yoy = compute_yoy_pct(raw_data["PERMIT"])
     logger.info(f"   Permits YoY: {len(permits_yoy)} months")
 
-    # Consumer sentiment: level (already monthly)
-    sentiment_by_date = {obs["date"]: obs["value"] for obs in raw_data["UMCSENT"]}
-    logger.info(f"   Sentiment: {len(sentiment_by_date)} months")
+    # Consumer sentiment: YoY % change (not level — level has structural break post-COVID)
+    sentiment_yoy = compute_yoy_pct(raw_data["UMCSENT"])
+    logger.info(f"   Sentiment YoY: {len(sentiment_yoy)} months")
 
     # Industrial production: monthly → YoY
     indpro_yoy = compute_yoy_pct(raw_data["INDPRO"])
@@ -225,7 +225,7 @@ async def main():
         set(t10y3m_by_date.keys()),
         set(claims_yoy.keys()),
         set(permits_yoy.keys()),
-        set(sentiment_by_date.keys()),
+        set(sentiment_yoy.keys()),
         set(indpro_yoy.keys()),
         set(recession_by_date.keys()),
     ]
@@ -235,7 +235,7 @@ async def main():
     # Build aligned arrays
     feature_names = [
         "sahm_value", "yield_curve_3m10y", "claims_yoy_pct",
-        "permits_yoy_pct", "consumer_sentiment", "indpro_yoy_pct",
+        "permits_yoy_pct", "sentiment_yoy_pct", "indpro_yoy_pct",
     ]
 
     X_rows = []
@@ -248,7 +248,7 @@ async def main():
             t10y3m_by_date[d],
             claims_yoy[d],
             permits_yoy[d],
-            sentiment_by_date[d],
+            sentiment_yoy[d],
             indpro_yoy[d],
         ]
         X_rows.append(row)
@@ -395,7 +395,7 @@ async def main():
             "yield_curve_3m10y": "10Y minus 3M Treasury spread (negative = inverted)",
             "claims_yoy_pct": "Initial claims 4-week avg, YoY % change (positive = rising claims)",
             "permits_yoy_pct": "Building permits YoY % change (negative = declining permits)",
-            "consumer_sentiment": "U. Michigan Consumer Sentiment Index level",
+            "sentiment_yoy_pct": "U. Michigan Consumer Sentiment YoY % change (negative = deteriorating)",
             "indpro_yoy_pct": "Industrial production YoY % change (negative = contracting)",
         },
         "notes": [

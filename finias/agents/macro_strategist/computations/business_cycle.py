@@ -73,6 +73,7 @@ class BusinessCycleAnalysis:
     retail_sales_yoy: Optional[float] = None
     consumer_sentiment: Optional[float] = None
     consumer_sentiment_trend: str = "unknown"
+    consumer_sentiment_yoy_pct: Optional[float] = None  # YoY % change for recession model
 
     # Activity
     industrial_production_yoy: Optional[float] = None
@@ -324,6 +325,15 @@ def analyze_business_cycle(
     if consumer_sentiment:
         result.consumer_sentiment = _latest(consumer_sentiment)
         result.consumer_sentiment_trend = _classify_trend_simple(consumer_sentiment, 3)
+
+    # Compute sentiment YoY % change for recession model
+    if consumer_sentiment and len(consumer_sentiment) >= 13:
+        current_sent = consumer_sentiment[-1]["value"]
+        year_ago_sent = consumer_sentiment[-13]["value"]
+        if year_ago_sent > 0:
+            result.consumer_sentiment_yoy_pct = round(
+                (current_sent / year_ago_sent - 1) * 100, 2
+            )
 
     # --- Activity ---
     result.industrial_production_yoy = _compute_yoy(industrial_production)
@@ -595,7 +605,7 @@ def _compute_recession_probability(result: BusinessCycleAnalysis, yield_curve_sl
         yield_curve_3m10y=yield_curve_slope,
         claims_yoy_pct=result.initial_claims_yoy_pct,
         permits_yoy_pct=result.building_permits_yoy_pct,
-        consumer_sentiment=result.consumer_sentiment,
+        sentiment_yoy_pct=result.consumer_sentiment_yoy_pct,
         indpro_yoy_pct=result.industrial_production_yoy,
     )
 

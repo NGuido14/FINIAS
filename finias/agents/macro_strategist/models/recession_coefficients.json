@@ -8,22 +8,22 @@
   "n_recession_months_train": 45,
   "n_recession_months_val": 2,
   "base_rate": 0.0987,
-  "regularization_C": 0.046416,
-  "intercept": -3.209845,
+  "regularization_C": 0.005995,
+  "intercept": -2.509988,
   "coefficients": {
-    "sahm_value": 0.11742,
-    "yield_curve_3m10y": -0.069012,
-    "claims_yoy_pct": 0.951418,
-    "permits_yoy_pct": -0.308172,
-    "consumer_sentiment": -0.612578,
-    "indpro_yoy_pct": -0.335285
+    "sahm_value": 0.194845,
+    "yield_curve_3m10y": 0.022748,
+    "claims_yoy_pct": 0.320738,
+    "permits_yoy_pct": -0.155985,
+    "sentiment_yoy_pct": -0.236851,
+    "indpro_yoy_pct": -0.208316
   },
   "feature_means": {
     "sahm_value": 0.313011,
     "yield_curve_3m10y": 1.776391,
     "claims_yoy_pct": -0.549496,
     "permits_yoy_pct": 2.938246,
-    "consumer_sentiment": 88.014474,
+    "sentiment_yoy_pct": 1.542654,
     "indpro_yoy_pct": 1.931535
   },
   "feature_stds": {
@@ -31,19 +31,19 @@
     "yield_curve_3m10y": 1.109846,
     "claims_yoy_pct": 17.481383,
     "permits_yoy_pct": 20.230972,
-    "consumer_sentiment": 11.786452,
+    "sentiment_yoy_pct": 12.164651,
     "indpro_yoy_pct": 4.064765
   },
-  "train_auc": 0.9919,
-  "train_brier": 0.029,
+  "train_auc": 0.9896,
+  "train_brier": 0.0503,
   "validation_auc": 0.9929,
-  "validation_brier": 0.164,
+  "validation_brier": 0.1405,
   "feature_descriptions": {
     "sahm_value": "Sahm Rule: 3m avg unemployment rise above 12m low of 3m averages",
     "yield_curve_3m10y": "10Y minus 3M Treasury spread (negative = inverted)",
     "claims_yoy_pct": "Initial claims 4-week avg, YoY % change (positive = rising claims)",
     "permits_yoy_pct": "Building permits YoY % change (negative = declining permits)",
-    "consumer_sentiment": "U. Michigan Consumer Sentiment Index level",
+    "sentiment_yoy_pct": "U. Michigan Consumer Sentiment YoY % change (negative = deteriorating)",
     "indpro_yoy_pct": "Industrial production YoY % change (negative = contracting)"
   },
   "notes": [
