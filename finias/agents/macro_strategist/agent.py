@@ -838,7 +838,7 @@ class MacroStrategist(BaseAgent):
         structure_response = await retry_claude_call(
             lambda: self._client.messages.create(
                 model=settings.claude_model_fast,
-                max_tokens=2000,
+                max_tokens=4000,
                 messages=[{"role": "user", "content": structuring_prompt}],
             )
         )
@@ -890,6 +890,10 @@ class MacroStrategist(BaseAgent):
         result.setdefault("macro_regime", "")
         result.setdefault("binding_constraint", "")
         result.setdefault("key_metrics", {})
+        result.setdefault("scenarios", [])
+        result.setdefault("catalysts", [])
+        result.setdefault("opportunities", [])
+        result.setdefault("regime_change_conditions", {})
 
         # NOTE: binding_constraint prepend moved to query() — runs AFTER validation
 
@@ -1069,6 +1073,39 @@ class MacroStrategist(BaseAgent):
                     f"(ratio change: {rsp_change:.4f}). Broad breadth improving."
                 )
 
+        # --- Sector Absolute Returns ---
+        sector_rets = br.get("sector_returns", {})
+        if sector_rets and len(sector_rets) >= 5:
+            # Sort by 20d return descending
+            sorted_sectors = sorted(
+                sector_rets.items(),
+                key=lambda x: x[1].get("20d", 0),
+                reverse=True,
+            )
+
+            NAMES = {
+                "XLB": "Materials", "XLC": "Comm Svcs", "XLE": "Energy",
+                "XLF": "Financials", "XLI": "Industrials", "XLK": "Technology",
+                "XLP": "Staples", "XLRE": "Real Estate", "XLU": "Utilities",
+                "XLV": "Healthcare", "XLY": "Cons Disc",
+            }
+
+            lines = ["- SECTOR PERFORMANCE (Polygon ETFs, absolute returns):"]
+            for sym, rets in sorted_sectors:
+                name = NAMES.get(sym, sym)
+                r5 = f"{rets.get('5d', 0):+.1f}%" if '5d' in rets else "N/A"
+                r20 = f"{rets.get('20d', 0):+.1f}%" if '20d' in rets else "N/A"
+                r60 = f"{rets.get('60d', 0):+.1f}%" if '60d' in rets else "N/A"
+
+                # Label leading/lagging
+                leading = br.get("sector_rotation", {}).get("leading", [])
+                lagging = br.get("sector_rotation", {}).get("lagging", [])
+                label = " ★LEADING" if sym in leading else " ▼LAGGING" if sym in lagging else ""
+
+                lines.append(f"    {name:12s} ({sym}): 5d={r5}, 20d={r20}, 60d={r60}{label}")
+
+            notes.append("\n".join(lines))
+
         # --- SKEW Index context ---
         vol = regime_dict.get("components", {}).get("volatility", {})
         skew_data = vol.get("skew", {})
@@ -1123,6 +1160,30 @@ class MacroStrategist(BaseAgent):
                 f"logistic regression model will replace this. For now, treat as directional guidance "
                 f"(low/moderate/elevated risk) rather than a precise percentage."
             )
+
+        # --- Recession Probability Drivers ---
+        rec_drivers = bc.get("recession_drivers")
+        if rec_drivers and isinstance(rec_drivers, dict) and rec_drivers.get("drivers"):
+            prob = rec_drivers.get("probability", 0)
+            base = rec_drivers.get("base_rate", 0)
+            driver_list = rec_drivers.get("drivers", [])
+
+            lines = [
+                f"- RECESSION PROBABILITY DECOMPOSITION (calibrated logistic model, "
+                f"AUC=0.99): Current probability {prob:.1%}, base rate {base:.1%}."
+            ]
+            for d in driver_list[:3]:  # Top 3 drivers only
+                feat = d["feature"].replace("_", " ").title()
+                val = d["value"]
+                std = d["std_devs_from_mean"]
+                contrib = d["contribution"]
+                direction = "pushes probability UP" if contrib > 0 else "pushes probability DOWN"
+                lines.append(
+                    f"    {feat}: {val:.2f} ({std:+.1f} std devs from mean, "
+                    f"contribution {contrib:+.3f}, {direction})"
+                )
+
+            notes.append("\n".join(lines))
 
         # --- Regime Classification Context ---
         primary = regime_dict.get("regime", {})
@@ -1878,6 +1939,34 @@ class MacroStrategist(BaseAgent):
                     f"VALIDATION: macro_regime '{claude_regime}' does not contain "
                     f"computed regime '{computed_regime}'"
                 )
+
+        # === TIER 3 (continued): Structural checks on new fields ===
+
+        # Scenarios should have required fields
+        for i, scenario in enumerate(interpretation.get("scenarios", [])):
+            if isinstance(scenario, dict):
+                if not scenario.get("probability"):
+                    warnings.append({
+                        "field": f"scenarios[{i}]",
+                        "note": "Missing probability assessment",
+                        "action": "flagged",
+                    })
+                if not scenario.get("trigger"):
+                    warnings.append({
+                        "field": f"scenarios[{i}]",
+                        "note": "Missing trigger condition",
+                        "action": "flagged",
+                    })
+
+        # Catalysts should have dates
+        for i, catalyst in enumerate(interpretation.get("catalysts", [])):
+            if isinstance(catalyst, dict):
+                if not catalyst.get("date"):
+                    warnings.append({
+                        "field": f"catalysts[{i}]",
+                        "note": "Missing date",
+                        "action": "flagged",
+                    })
 
         # === Build validation summary ===
         from datetime import datetime, timezone

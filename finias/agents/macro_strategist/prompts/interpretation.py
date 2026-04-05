@@ -217,11 +217,49 @@ MACRO_STRUCTURING_PROMPT = """Convert the following macro analysis into a JSON o
         "sahm_value": <exact Sahm value from the analysis>,
         "composite_score": <exact composite score from the analysis>,
         "forward_bias": "<constructive/neutral/cautious from the analysis>"
+    }},
+    "scenarios": [
+        {{
+            "name": "<scenario name>",
+            "probability": "<low/moderate/high>",
+            "impact": "<market impact description>",
+            "positioning": "<what to do: sectors, cash, beta>",
+            "trigger": "<what event/data triggers this scenario>"
+        }}
+    ],
+    "catalysts": [
+        {{
+            "event": "<event name>",
+            "date": "<approximate date or date range>",
+            "significance": "<low/moderate/high/critical>",
+            "if_bullish": "<what happens if positive>",
+            "if_bearish": "<what happens if negative>"
+        }}
+    ],
+    "opportunities": [
+        {{
+            "setup": "<opportunity name>",
+            "thesis": "<why this works in current regime>",
+            "entry_condition": "<what to wait for>",
+            "invalidation": "<what makes this wrong>",
+            "time_horizon": "<days/weeks>",
+            "conviction": "<low/moderate/high>"
+        }}
+    ],
+    "regime_change_conditions": {{
+        "toward_risk_off": "<what conditions would shift regime to risk_off>",
+        "toward_improvement": "<what conditions would improve the regime>",
+        "most_likely_next_regime": "<most probable next regime>",
+        "estimated_timeline": "<when could it shift>"
     }}
 }}
 
 CRITICAL: The binding_constraint field MUST match the binding constraint described in the analysis. Do NOT invent a different binding constraint.
 CRITICAL: The key_metrics values must be EXACT numbers from the analysis — do not round or change them.
+CRITICAL: The scenarios MUST include probability, positioning, and trigger for each scenario.
+CRITICAL: The catalysts MUST include specific dates (or date ranges) and both bullish/bearish outcomes.
+CRITICAL: The opportunities should be macro-level setups (sectors, asset classes), not individual stock picks.
+CRITICAL: Frame opportunities as "setups to evaluate" not "trade recommendations."
 
 ANALYSIS TO STRUCTURE:
 {analysis_text}"""

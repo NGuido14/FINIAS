@@ -229,6 +229,40 @@ class Director(BaseAgent):
             if metrics:
                 parts.append(f"\nKey Metrics: {json.dumps(metrics)}")
 
+            # Forward-looking intelligence from interpretation
+            if interp.get("scenarios"):
+                scenario_parts = []
+                for s in interp["scenarios"][:3]:
+                    if isinstance(s, dict):
+                        scenario_parts.append(
+                            f"  - {s.get('name', 'Unknown')} ({s.get('probability', '?')}): "
+                            f"{s.get('impact', '')}"
+                        )
+                if scenario_parts:
+                    parts.append("Scenarios:\n" + "\n".join(scenario_parts))
+
+            if interp.get("catalysts"):
+                catalyst_parts = []
+                for c in interp["catalysts"][:3]:
+                    if isinstance(c, dict):
+                        catalyst_parts.append(
+                            f"  - {c.get('event', 'Unknown')} ({c.get('date', '?')}): "
+                            f"significance={c.get('significance', '?')}"
+                        )
+                if catalyst_parts:
+                    parts.append("Upcoming Catalysts:\n" + "\n".join(catalyst_parts))
+
+            if interp.get("opportunities"):
+                opp_parts = []
+                for o in interp["opportunities"][:3]:
+                    if isinstance(o, dict):
+                        opp_parts.append(
+                            f"  - {o.get('setup', 'Unknown')}: {o.get('thesis', '')} "
+                            f"(conviction: {o.get('conviction', '?')})"
+                        )
+                if opp_parts:
+                    parts.append("Opportunities:\n" + "\n".join(opp_parts))
+
             return "\n".join(parts)
 
         except Exception as e:

@@ -87,6 +87,7 @@ class BusinessCycleAnalysis:
     # Composite
     composite_leading: float = 0.0                  # -1 to +1
     recession_probability: float = 0.0              # 0 to 1
+    recession_drivers: dict = None                   # Feature decomposition from logistic model
 
     # Sector implications
     favored_sectors: list[str] = field(default_factory=list)
@@ -147,6 +148,7 @@ class BusinessCycleAnalysis:
             },
             "composite_leading": self.composite_leading,
             "recession_probability": self.recession_probability,
+            "recession_drivers": self.recession_drivers,
             "_recession_model": "calibrated_logistic" if Path(__file__).parent.parent.joinpath(
                 "models", "recession_coefficients.json"
             ).exists() else "heuristic_fallback",
@@ -600,7 +602,7 @@ def _compute_recession_probability(result: BusinessCycleAnalysis, yield_curve_sl
     """
     from finias.agents.macro_strategist.models.recession_model import predict_recession_probability
 
-    prob = predict_recession_probability(
+    model_result = predict_recession_probability(
         sahm_value=result.sahm_value,
         yield_curve_3m10y=yield_curve_slope,
         claims_yoy_pct=result.initial_claims_yoy_pct,
@@ -609,8 +611,9 @@ def _compute_recession_probability(result: BusinessCycleAnalysis, yield_curve_sl
         indpro_yoy_pct=result.industrial_production_yoy,
     )
 
-    if prob is not None:
-        return prob
+    if model_result is not None:
+        result.recession_drivers = model_result
+        return model_result["probability"]
 
     # Fallback: original heuristic if model not trained yet
     prob = 0.0

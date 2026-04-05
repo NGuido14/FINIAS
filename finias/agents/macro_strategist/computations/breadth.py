@@ -47,6 +47,9 @@ class BreadthAnalysis:
     cyclical_vs_defensive: float = 0.0              # Positive = cyclicals leading
     rotation_signal: str = "neutral"                # risk_on_rotation, risk_off_rotation, neutral
 
+    # Sector absolute returns (not relative to SPY — for interpretation data notes)
+    sector_absolute_returns: dict = field(default_factory=dict)  # symbol → {5d, 20d, 60d}
+
     # Sector dispersion
     sector_dispersion_20d: Optional[float] = None   # Std dev of 20d sector returns
     dispersion_regime: str = "unknown"              # low, normal, high
@@ -81,6 +84,7 @@ class BreadthAnalysis:
                 "cyclical_vs_defensive": self.cyclical_vs_defensive,
                 "rotation_signal": self.rotation_signal,
             },
+            "sector_returns": self.sector_absolute_returns,
             "dispersion": {
                 "dispersion_20d": self.sector_dispersion_20d,
                 "regime": self.dispersion_regime,
@@ -208,6 +212,17 @@ def _analyze_sectors(
             sector_ret_60 = (sector_window[-1] / sector_window[-60] - 1) * 100
             spy_ret_60 = (spy_window[-1] / spy_window[-60] - 1) * 100
             sector_returns_60d[symbol] = sector_ret_60 - spy_ret_60
+
+        # Absolute returns for interpretation data notes
+        abs_returns = {}
+        if len(closes) >= 6:
+            abs_returns["5d"] = round(float((closes[-1] / closes[-6] - 1) * 100), 2)
+        if len(closes) >= 21:
+            abs_returns["20d"] = round(float((closes[-1] / closes[-21] - 1) * 100), 2)
+        if len(closes) >= 61:
+            abs_returns["60d"] = round(float((closes[-1] / closes[-61] - 1) * 100), 2)
+        if abs_returns:
+            result.sector_absolute_returns[symbol] = abs_returns
 
     if sector_count > 0:
         result.sectors_above_200ma = above_200

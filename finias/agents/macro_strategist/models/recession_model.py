@@ -140,4 +140,30 @@ def predict_recession_probability(
     z = max(-20.0, min(20.0, z))
     probability = 1.0 / (1.0 + math.exp(-z))
 
-    return round(probability, 4)
+    # Feature contribution decomposition for explainability
+    drivers = []
+    for name, value in features.items():
+        if value is not None and name in coefficients:
+            mean = means.get(name, 0.0)
+            std = stds.get(name, 1.0)
+            if std > 0:
+                standardized = (value - mean) / std
+                contribution = coefficients[name] * standardized
+                drivers.append({
+                    "feature": name,
+                    "value": round(value, 4),
+                    "std_devs_from_mean": round(standardized, 2),
+                    "contribution": round(contribution, 3),
+                })
+
+    # Sort by absolute contribution (strongest driver first)
+    drivers.sort(key=lambda d: abs(d["contribution"]), reverse=True)
+
+    base_prob = 1.0 / (1.0 + math.exp(-intercept))
+
+    return {
+        "probability": round(probability, 4),
+        "drivers": drivers,
+        "base_rate": round(base_prob, 4),
+        "intercept": round(intercept, 4),
+    }

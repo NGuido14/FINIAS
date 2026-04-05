@@ -33,6 +33,23 @@ MORNING_REFRESH_PROMPT = """Provide a comprehensive morning macro assessment cov
 
 11. WEB SEARCH VERIFICATION: Search for current values of any data that may be materially stale given market conditions. Specifically verify: current VIX, oil prices (both WTI AND Brent — note the spread), credit spreads, and any breaking geopolitical developments affecting markets. Also check Atlanta Fed GDPNow for the current quarter estimate.
 
+12. FORWARD-LOOKING ANALYSIS — This section is CRITICAL for downstream agents. Do not skip any subsection.
+    a) SCENARIOS: Identify 2-3 scenarios that could unfold in the next 1-4 weeks. For each scenario provide:
+       a name, probability assessment (low/moderate/high), the market impact if it occurs,
+       specific positioning implications (which sectors to overweight/underweight, cash level, beta),
+       and the specific event or data point that would trigger it.
+    b) CATALYSTS: List the top 2-3 upcoming catalysts with approximate dates. For each:
+       what specifically to watch in the data, what happens if it's bullish/positive,
+       what happens if it's bearish/negative.
+    c) OPPORTUNITIES: Identify 1-3 specific trade setups this environment creates. For each:
+       the macro thesis (why this works in the current regime), entry condition (what price level
+       or data threshold to wait for), invalidation criteria (what would make the thesis wrong),
+       time horizon (days/weeks), and conviction level (low/moderate/high).
+       Frame these as setups for evaluation, not trade recommendations.
+    d) REGIME CHANGE CONDITIONS: What specific combination of data changes would cause the
+       current regime to shift? How far is each condition from triggering? What is the
+       most likely next regime and the estimated timeline for transition?
+
 Be specific. Cite exact numbers. Explain cross-domain connections. Identify conflicts between signals. Think like a macro strategist at a top hedge fund.
 
 {question}"""
