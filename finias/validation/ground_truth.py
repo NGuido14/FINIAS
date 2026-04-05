@@ -73,20 +73,35 @@ async def validate_sahm_rule(db: DatabasePool, fred: FredClient) -> dict:
     divergent = []
     compared = 0
 
+    # Deduplicate: track which FRED reference dates have already been compared
+    # to avoid showing the same divergence N times when N assessments map to
+    # the same monthly FRED date. Keep the assessment closest to the FRED date.
+    best_by_ref_date = {}  # ref_date -> (our_date, our_value, distance)
+
     for row in rows:
         our_date = str(row["assess_date"])
         our_value = float(row["sahm_value"])
 
-        # Find nearest FRED reference date (within 7 days)
+        # Find nearest FRED reference date (within 35 days for monthly data)
         nearest_ref = None
+        nearest_distance = 999
         for rd in ref_dates:
-            if abs((date.fromisoformat(rd) - date.fromisoformat(our_date)).days) <= 7:
+            dist = abs((date.fromisoformat(rd) - date.fromisoformat(our_date)).days)
+            if dist <= 35 and dist < nearest_distance:
                 nearest_ref = rd
+                nearest_distance = dist
 
         if nearest_ref is None:
             continue
 
-        ref_value = ref_lookup[nearest_ref]
+        # Keep only the closest assessment for each FRED reference date
+        existing = best_by_ref_date.get(nearest_ref)
+        if existing is None or nearest_distance < existing[2]:
+            best_by_ref_date[nearest_ref] = (our_date, our_value, nearest_distance)
+
+    # Now compute errors from deduplicated comparisons
+    for ref_date, (our_date, our_value, _dist) in sorted(best_by_ref_date.items()):
+        ref_value = ref_lookup[ref_date]
         error = abs(our_value - ref_value)
         errors.append(error)
         compared += 1
@@ -94,7 +109,7 @@ async def validate_sahm_rule(db: DatabasePool, fred: FredClient) -> dict:
         if error > 0.02:
             divergent.append({
                 "our_date": our_date,
-                "ref_date": nearest_ref,
+                "ref_date": ref_date,
                 "our_value": round(our_value, 4),
                 "ref_value": round(ref_value, 4),
                 "error": round(error, 4),
@@ -153,19 +168,31 @@ async def validate_2s10s_spread(db: DatabasePool, fred: FredClient) -> dict:
     divergent = []
     compared = 0
 
+    # Deduplicate: keep only the closest assessment per FRED reference date
+    best_by_ref_date = {}  # ref_date -> (our_date, our_value, distance)
+
     for row in rows:
         our_date = str(row["assess_date"])
         our_value = float(row["spread_2s10s"])
 
         nearest_ref = None
+        nearest_distance = 999
         for rd in ref_dates:
-            if abs((date.fromisoformat(rd) - date.fromisoformat(our_date)).days) <= 3:
+            dist = abs((date.fromisoformat(rd) - date.fromisoformat(our_date)).days)
+            if dist <= 3 and dist < nearest_distance:
                 nearest_ref = rd
+                nearest_distance = dist
 
         if nearest_ref is None:
             continue
 
-        ref_value = ref_lookup[nearest_ref]
+        existing = best_by_ref_date.get(nearest_ref)
+        if existing is None or nearest_distance < existing[2]:
+            best_by_ref_date[nearest_ref] = (our_date, our_value, nearest_distance)
+
+    # Compute errors from deduplicated comparisons
+    for ref_date, (our_date, our_value, _dist) in sorted(best_by_ref_date.items()):
+        ref_value = ref_lookup[ref_date]
         error = abs(our_value - ref_value)
         errors.append(error)
         compared += 1
@@ -173,7 +200,7 @@ async def validate_2s10s_spread(db: DatabasePool, fred: FredClient) -> dict:
         if error > 0.05:
             divergent.append({
                 "our_date": our_date,
-                "ref_date": nearest_ref,
+                "ref_date": ref_date,
                 "our_value": round(our_value, 4),
                 "ref_value": round(ref_value, 4),
                 "error": round(error, 4),

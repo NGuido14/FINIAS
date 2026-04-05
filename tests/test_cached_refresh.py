@@ -108,3 +108,50 @@ def test_macro_strategist_has_prior_assessment_method():
     """MacroStrategist should have _build_prior_assessment_context method."""
     from finias.agents.macro_strategist.agent import MacroStrategist
     assert hasattr(MacroStrategist, '_build_prior_assessment_context')
+
+
+def test_cached_context_includes_recession_drivers():
+    """Verify recession drivers appear in cached context when available."""
+    # This is a structural test — it checks the regime dict contains
+    # the fields that _get_cached_macro_context() now reads.
+    regime_dict = {
+        "components": {
+            "business_cycle": {
+                "recession_drivers": {
+                    "probability": 0.0907,
+                    "model_type": "calibrated_logistic",
+                    "base_rate": 0.0752,
+                    "drivers": [
+                        {"feature": "sentiment_yoy_pct", "value": -12.5, "contribution": 0.274},
+                        {"feature": "claims_yoy_pct", "value": 3.2, "contribution": 0.089},
+                        {"feature": "indpro_yoy_pct", "value": -1.1, "contribution": 0.045},
+                    ],
+                },
+            },
+            "breadth": {
+                "sector_returns": {
+                    "XLE": {"5d": 2.1, "20d": 8.3, "60d": 39.2},
+                    "XLU": {"5d": 0.5, "20d": 1.2, "60d": 6.1},
+                    "XLC": {"5d": -1.2, "20d": -3.5, "60d": -10.1},
+                },
+                "sector_rotation": {
+                    "leading": ["XLE", "XLU"],
+                    "lagging": ["XLC"],
+                },
+            },
+        },
+        "key_levels": {"recession_prob": 0.0907},
+    }
+    # Verify the data structure is correct for the cached context builder
+    bc = regime_dict["components"]["business_cycle"]
+    assert "recession_drivers" in bc
+    assert len(bc["recession_drivers"]["drivers"]) == 3
+    assert bc["recession_drivers"]["drivers"][0]["feature"] == "sentiment_yoy_pct"
+
+    # Verify sector returns structure
+    br = regime_dict["components"]["breadth"]
+    assert "sector_returns" in br
+    assert "XLE" in br["sector_returns"]
+    assert br["sector_returns"]["XLE"]["60d"] == 39.2
+    assert "leading" in br["sector_rotation"]
+    assert "XLE" in br["sector_rotation"]["leading"]

@@ -328,7 +328,7 @@ class TestPairRegimeClassification:
         assert pair.regime_label in ("normal", "decoupling", "stress_coupling", "breakdown")
 
     def test_stress_coupling_high_spread(self):
-        """High vol_regime_spread should produce stress_coupling."""
+        """High vol_regime_spread should produce stress_coupling only with meaningful correlation."""
         # This is hard to guarantee with synthetic data, so we just check the code path exists
         rng = np.random.RandomState(42)
         a = rng.randn(300)
@@ -337,6 +337,27 @@ class TestPairRegimeClassification:
         pair = _compute_pair("test", "A", "B", a, b, vix)
         assert pair is not None
         assert pair.regime_label in ("normal", "decoupling", "stress_coupling", "breakdown")
+
+    def test_stress_coupling_requires_meaningful_correlation(self):
+        """High vol_regime_spread but low |corr| should produce decoupling, not stress_coupling."""
+        rng = np.random.RandomState(123)
+        # Create nearly uncorrelated series
+        a = rng.randn(300)
+        b = rng.randn(300)  # Independent — correlation ~0
+        # Create high VIX regime spread to trigger vol_regime_spread > 0.20
+        vix = np.concatenate([np.ones(150) * 12.0, np.ones(150) * 40.0])
+        pair = _compute_pair("test_low_corr", "A", "B", a, b, vix)
+        assert pair is not None
+        # With independent series, |corr_60d| should be near 0 (well below 0.25)
+        # So the regime should NOT be stress_coupling
+        if pair.regime_label is not None:
+            # If vol_regime_spread triggered and corr is low, should get decoupling
+            assert pair.regime_label != "stress_coupling" or (
+                pair.corr_60d is not None and np.abs(pair.corr_60d) > 0.25
+            ), (
+                f"stress_coupling assigned with |corr_60d|={abs(pair.corr_60d):.3f} "
+                f"(below 0.25 threshold)"
+            )
 
     def test_unknown_when_no_corr(self):
         """When corr_60d is None (insufficient data), regime should be None."""

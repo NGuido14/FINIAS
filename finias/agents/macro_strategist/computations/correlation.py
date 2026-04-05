@@ -589,10 +589,17 @@ def _compute_pair(
             if np.abs(corr_60d) > 0.1:
                 regime_label = "breakdown"
 
-        # Check for stress coupling (high vol regime spread)
+        # Check for stress coupling (high vol regime spread AND meaningful correlation)
+        # A high vol_regime_spread with low absolute correlation means the assets
+        # respond differently to volatility regimes but aren't actually correlated.
+        # That's decoupling, not stress coupling. Require |corr_60d| > 0.25 to
+        # label as stress_coupling — otherwise it's misleading.
         if regime_label is None and vol_regime_spread is not None:
             if vol_regime_spread > 0.20:
-                regime_label = "stress_coupling"
+                if corr_60d is not None and np.abs(corr_60d) > 0.25:
+                    regime_label = "stress_coupling"
+                elif corr_60d is not None and np.abs(corr_60d) <= 0.25:
+                    regime_label = "decoupling"
 
         # Check for decoupling (120d high but 60d low)
         if regime_label is None:

@@ -224,10 +224,70 @@ class Director(BaseAgent):
                 for item in interp["watch_items"]:
                     parts.append(f"  - {item}")
 
+            # Recession model decomposition
+            components = regime.get("components", {})
+            bc = components.get("business_cycle", {})
+            recession_drivers = bc.get("recession_drivers", {})
+            recession_prob = key_levels.get("recession_prob")
+            if recession_prob is not None:
+                model_type = recession_drivers.get("model_type", "heuristic")
+                parts.append(f"\nRecession Probability: {recession_prob:.1%} ({model_type} model)")
+                drivers = recession_drivers.get("drivers", [])
+                if drivers:
+                    driver_strs = []
+                    for d in drivers[:3]:
+                        if isinstance(d, dict):
+                            driver_strs.append(
+                                f"{d.get('feature', '?')}: {d.get('value', 0):.2f} "
+                                f"({d.get('contribution', 0):+.3f} contribution)"
+                            )
+                    if driver_strs:
+                        parts.append("Recession Drivers (top 3):")
+                        for ds in driver_strs:
+                            parts.append(f"  - {ds}")
+                    base_rate = recession_drivers.get("base_rate")
+                    if base_rate is not None:
+                        parts.append(f"  Base rate: {base_rate:.2%}")
+
             # Key metrics
             metrics = interp.get("key_metrics", {})
             if metrics:
                 parts.append(f"\nKey Metrics: {json.dumps(metrics)}")
+
+            # Sector absolute returns
+            breadth = components.get("breadth", {})
+            sector_returns = breadth.get("sector_returns", {})
+            rotation = breadth.get("sector_rotation", {})
+            if sector_returns:
+                NAMES = {
+                    "XLB": "Materials", "XLC": "Comm Svcs", "XLE": "Energy",
+                    "XLF": "Financials", "XLI": "Industrials", "XLK": "Technology",
+                    "XLP": "Staples", "XLRE": "Real Estate", "XLU": "Utilities",
+                    "XLV": "Healthcare", "XLY": "Cons Disc",
+                }
+                leading = rotation.get("leading", [])
+                lagging = rotation.get("lagging", [])
+                # Show leading sectors
+                if leading:
+                    lead_lines = []
+                    for sym in leading[:3]:
+                        rets = sector_returns.get(sym, {})
+                        name = NAMES.get(sym, sym)
+                        r5 = f"{rets.get('5d', 0):+.1f}%" if '5d' in rets else "N/A"
+                        r20 = f"{rets.get('20d', 0):+.1f}%" if '20d' in rets else "N/A"
+                        r60 = f"{rets.get('60d', 0):+.1f}%" if '60d' in rets else "N/A"
+                        lead_lines.append(f"  {name} ({sym}): 5d={r5}, 20d={r20}, 60d={r60}")
+                    parts.append("Leading Sectors (absolute returns):\n" + "\n".join(lead_lines))
+                if lagging:
+                    lag_lines = []
+                    for sym in lagging[:3]:
+                        rets = sector_returns.get(sym, {})
+                        name = NAMES.get(sym, sym)
+                        r5 = f"{rets.get('5d', 0):+.1f}%" if '5d' in rets else "N/A"
+                        r20 = f"{rets.get('20d', 0):+.1f}%" if '20d' in rets else "N/A"
+                        r60 = f"{rets.get('60d', 0):+.1f}%" if '60d' in rets else "N/A"
+                        lag_lines.append(f"  {name} ({sym}): 5d={r5}, 20d={r20}, 60d={r60}")
+                    parts.append("Lagging Sectors (absolute returns):\n" + "\n".join(lag_lines))
 
             # Forward-looking intelligence from interpretation
             if interp.get("scenarios"):
@@ -262,6 +322,21 @@ class Director(BaseAgent):
                         )
                 if opp_parts:
                     parts.append("Opportunities:\n" + "\n".join(opp_parts))
+
+            # Regime change conditions
+            rcc = interp.get("regime_change_conditions", {})
+            if rcc and isinstance(rcc, dict):
+                rcc_parts = []
+                if rcc.get("toward_risk_off"):
+                    rcc_parts.append(f"  Toward risk_off: {rcc['toward_risk_off']}")
+                if rcc.get("toward_improvement"):
+                    rcc_parts.append(f"  Toward improvement: {rcc['toward_improvement']}")
+                if rcc.get("most_likely_next_regime"):
+                    rcc_parts.append(f"  Most likely next: {rcc['most_likely_next_regime']}")
+                if rcc.get("estimated_timeline"):
+                    rcc_parts.append(f"  Timeline: {rcc['estimated_timeline']}")
+                if rcc_parts:
+                    parts.append("Regime Change Conditions:\n" + "\n".join(rcc_parts))
 
             return "\n".join(parts)
 
