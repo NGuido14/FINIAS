@@ -353,6 +353,18 @@ class Director(BaseAgent):
                         + f"\n  Aggregate: {agg_score:+.2f}, S&P 500 signal: {signal}"
                     )
 
+            # Data Quality Warnings
+            data_freshness = trajectory.get("data_freshness", {})
+            quality_warnings = data_freshness.get("warnings", [])
+            non_generic_warnings = [
+                w for w in quality_warnings
+                if "GDPNow" not in w  # Skip the generic GDPNow note — already handled
+            ]
+            if non_generic_warnings:
+                parts.append("Data Quality Warnings:")
+                for w in non_generic_warnings:
+                    parts.append(f"  ⚠ {w}")
+
             # Regime change conditions
             rcc = interp.get("regime_change_conditions", {})
             if rcc and isinstance(rcc, dict):
