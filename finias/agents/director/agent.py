@@ -341,7 +341,9 @@ class Director(BaseAgent):
                     pctl = cp.get("net_spec_percentile", 50)
                     crowding = cp.get("crowding", "neutral")
                     flag = f" ★{crowding.upper().replace('_', ' ')}" if crowding != "neutral" else ""
-                    pos_parts.append(f"  {label}: {pctl:.0f}th percentile{flag}")
+                    net = cp.get("net_spec", 0)
+                    direction = "LONG" if net > 0 else "SHORT"
+                    pos_parts.append(f"  {label}: {net:+,} ({direction}), {pctl:.0f}th percentile{flag}")
                 if pos_parts:
                     agg_score = pos_agg.get("score", 0)
                     signal = pos_agg.get("sp500_positioning_signal", "neutral")

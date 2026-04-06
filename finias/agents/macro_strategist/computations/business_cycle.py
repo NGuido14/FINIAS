@@ -372,6 +372,26 @@ def _compute_sahm_rule(unemployment: list[dict]) -> tuple[float, bool]:
     if not unemployment or len(unemployment) < 15:
         return 0.0, False
 
+    # Detect month gaps — missing months corrupt rolling averages
+    dates = [u.get("date") or u.get("obs_date") for u in unemployment]
+    if dates and dates[0] is not None:
+        from datetime import date as _date
+        try:
+            for i in range(1, len(dates)):
+                if dates[i] is None or dates[i-1] is None:
+                    continue
+                d1 = _date.fromisoformat(str(dates[i-1])) if isinstance(dates[i-1], str) else dates[i-1]
+                d2 = _date.fromisoformat(str(dates[i])) if isinstance(dates[i], str) else dates[i]
+                gap_months = (d2.year - d1.year) * 12 + (d2.month - d1.month)
+                if gap_months > 1:
+                    import logging
+                    logging.getLogger("finias.computation").warning(
+                        f"Sahm Rule: {gap_months}-month gap in UNRATE data between "
+                        f"{d1} and {d2}. Rolling averages may be corrupted."
+                    )
+        except (ValueError, TypeError):
+            pass  # Synthetic or malformed dates — skip gap detection
+
     values = [u["value"] for u in unemployment]
 
     # Compute ALL rolling 3-month averages

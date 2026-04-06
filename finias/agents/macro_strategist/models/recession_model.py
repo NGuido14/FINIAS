@@ -166,4 +166,5 @@ def predict_recession_probability(
         "drivers": drivers,
         "base_rate": round(base_prob, 4),
         "intercept": round(intercept, 4),
+        "model_type": model.get("model_type", "calibrated_logistic"),
     }

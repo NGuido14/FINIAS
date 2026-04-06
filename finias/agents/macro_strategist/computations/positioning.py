@@ -331,10 +331,19 @@ def generate_positioning_data_notes(positioning: PositioningAnalysis) -> list[st
         elif cp.crowding == "crowded_short":
             crowding_flag = " ★CROWDED SHORT"
 
+        # Direction label and percentile context to prevent misinterpretation
+        direction = "LONG" if cp.net_spec > 0 else "SHORT"
+        if cp.net_spec > 0:
+            pctl_context = f"more long than {cp.net_spec_percentile:.0f}% of last 3yr"
+        elif cp.net_spec_percentile > 50:
+            pctl_context = f"less short than {cp.net_spec_percentile:.0f}% of last 3yr"
+        else:
+            pctl_context = f"more short than {100 - cp.net_spec_percentile:.0f}% of last 3yr"
+
         roc_dir = "adding" if cp.rate_of_change_4w > 0 else "reducing"
         notes.append(
-            f"    {label}: net spec {cp.net_spec:+,}, "
-            f"{cp.net_spec_percentile:.0f}th percentile{crowding_flag}, "
+            f"    {label}: net spec {cp.net_spec:+,} ({direction}), "
+            f"{cp.net_spec_percentile:.0f}th percentile ({pctl_context}){crowding_flag}, "
             f"{roc_dir} {abs(cp.rate_of_change_4w):,}/4wk "
             f"({cp.confidence} confidence, {cp.lookback_weeks}wk history)"
         )
