@@ -87,6 +87,7 @@ class RegimeAssessment:
     assessed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     consistency_warnings: list = field(default_factory=list)
     trajectory: dict = field(default_factory=dict)    # TrajectoryAssessment.to_dict()
+    positioning: dict = field(default_factory=dict)   # PositioningAnalysis.to_dict()
 
     def to_dict(self) -> dict:
         return {
@@ -126,6 +127,7 @@ class RegimeAssessment:
             "assessed_at": self.assessed_at.isoformat(),
             "consistency_warnings": self.consistency_warnings,
             "trajectory": self.trajectory,
+            "positioning": self.positioning,
         }
 
     def to_downstream_context(self) -> "MacroContext":
@@ -213,6 +215,12 @@ class RegimeAssessment:
         # Breadth
         br_data = self.breadth if isinstance(self.breadth, dict) else {}
 
+        # Positioning data
+        pos_data = self.positioning if isinstance(self.positioning, dict) else {}
+        pos_agg = pos_data.get("aggregate", {})
+        pos_contracts = pos_data.get("contracts", {})
+        sp500_pos = pos_contracts.get("sp500", {})
+
         # Run consistency checks
         warnings = _validate_consistency(
             self.composite_score,
@@ -298,6 +306,10 @@ class RegimeAssessment:
             geopolitical_risk_level=traj_geo.get("risk_level", "unknown"),
             narrative_regime=traj_geo.get("narrative_regime", "unknown"),
             data_freshness_warnings=traj.get("data_freshness", {}).get("warnings", []),
+            sp500_positioning_percentile=sp500_pos.get("net_spec_percentile", 50.0),
+            sp500_positioning_crowding=sp500_pos.get("crowding", "neutral"),
+            positioning_aggregate_score=pos_agg.get("score", 0.0),
+            positioning_crowding_count=pos_agg.get("crowding_alert_count", 0),
             consistency_warnings=warnings,
         )
 
@@ -359,6 +371,7 @@ class RegimeAssessment:
                 "participation": self.breadth.get("sector_participation", {}),
                 "rotation": self.breadth.get("sector_rotation", {}),
             },
+            "positioning_summary": self.positioning.get("aggregate", {}) if self.positioning else {},
         }
 
 
@@ -459,6 +472,12 @@ class MacroContext:
 
     # === DATA QUALITY (for all agents — confidence calibration) ===
     data_freshness_warnings: list = field(default_factory=list)
+
+    # === POSITIONING (for Trade Decision Agent / Risk Officer) ===
+    sp500_positioning_percentile: float = 50.0              # 0-100 (CFTC COT)
+    sp500_positioning_crowding: str = "neutral"             # crowded_long, crowded_short, neutral
+    positioning_aggregate_score: float = 0.0                # -1 to +1
+    positioning_crowding_count: int = 0                     # How many contracts at extremes
 
     # Consistency
     consistency_warnings: list = field(default_factory=list)  # Any internal contradictions detected

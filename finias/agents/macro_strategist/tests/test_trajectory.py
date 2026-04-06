@@ -227,10 +227,10 @@ class TestForwardBias:
     """Test net forward-looking bias computation."""
 
     def test_forward_bias_constructive(self):
-        """Easing + opportunity + away → 'constructive', high score."""
+        """Easing + constructive positioning + away → 'constructive', high score."""
         result = compute_forward_bias(
             inflation_trajectory="easing",
-            stress_contrarian="opportunity",
+            positioning_signal="constructive",
             binding_shift_direction="away_from_inflation",
         )
 
@@ -239,10 +239,10 @@ class TestForwardBias:
         assert result["confidence"] == "high"
 
     def test_forward_bias_cautious(self):
-        """Tightening + caution + toward → 'cautious', high score."""
+        """Tightening + cautious positioning + toward → 'cautious', high score."""
         result = compute_forward_bias(
             inflation_trajectory="tightening",
-            stress_contrarian="caution",
+            positioning_signal="cautious",
             binding_shift_direction="toward_inflation",
         )
 
@@ -254,7 +254,7 @@ class TestForwardBias:
         """Mixed signals → low confidence."""
         result = compute_forward_bias(
             inflation_trajectory="easing",
-            stress_contrarian="caution",
+            positioning_signal="cautious",
             binding_shift_direction="toward_inflation",
         )
 
@@ -264,7 +264,7 @@ class TestForwardBias:
         """All stable → 'neutral', moderate confidence."""
         result = compute_forward_bias(
             inflation_trajectory="stable",
-            stress_contrarian="neutral",
+            positioning_signal="neutral",
             binding_shift_direction="none",
         )
 

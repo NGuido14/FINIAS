@@ -42,9 +42,13 @@ class TrajectoryAssessment:
     inflation_trajectory: str = "unknown"                    # easing, stable, tightening
     inflation_score_4w_change: float = 0.0                   # Change in inflation category score
 
-    # === Signal 2: Stress Contrarian ===
+    # === Signal 2: Stress Contrarian (legacy — kept for backward compatibility) ===
     stress_4w_change: float = 0.0
     stress_contrarian_signal: str = "neutral"                # opportunity, neutral, caution
+
+    # === Signal 2b: CFTC Positioning (replaces stress_contrarian in forward_bias) ===
+    positioning_signal: str = "neutral"                      # constructive, neutral, cautious
+    sp500_net_spec_percentile: float = 50.0                  # 0-100
 
     # === Signal 3: Binding Constraint Shift ===
     binding_constraint_shifted: bool = False
@@ -110,6 +114,8 @@ class TrajectoryAssessment:
                 "inflation_score_4w_change": self.inflation_score_4w_change,
                 "stress_contrarian": self.stress_contrarian_signal,
                 "stress_4w_change": self.stress_4w_change,
+                "positioning_signal": self.positioning_signal,
+                "sp500_net_spec_percentile": self.sp500_net_spec_percentile,
                 "binding_shifted": self.binding_constraint_shifted,
                 "prior_binding": self.prior_binding_constraint,
                 "shift_direction": self.binding_shift_direction,
@@ -437,18 +443,21 @@ def compute_sector_guidance(
 
 def compute_forward_bias(
     inflation_trajectory: str,
-    stress_contrarian: str,
+    positioning_signal: str,
     binding_shift_direction: str,
 ) -> dict:
     """
     Net forward-looking assessment from the three validated signals.
 
     Inflation trajectory gets 2x weight (strongest signal in backtest).
+    Positioning signal (from CFTC COT data) replaces stress_contrarian
+    as Signal 2 — stress_contrarian underperformed neutral baseline
+    (+0.96% vs +1.15%) in backtesting.
 
     Score mapping:
-      +1: easing / opportunity / away_from_inflation
+      +1: easing / constructive / away_from_inflation
        0: stable / neutral / none
-      -1: tightening / caution / toward_inflation
+      -1: tightening / cautious / toward_inflation
 
     Classification:
       > +0.25: constructive
@@ -457,11 +466,11 @@ def compute_forward_bias(
     """
     # Score each signal
     infl_score = {"easing": 1, "stable": 0, "tightening": -1}.get(inflation_trajectory, 0)
-    stress_score = {"opportunity": 1, "neutral": 0, "caution": -1}.get(stress_contrarian, 0)
+    pos_score = {"constructive": 1, "neutral": 0, "cautious": -1}.get(positioning_signal, 0)
     shift_score = {"away_from_inflation": 1, "none": 0, "toward_inflation": -1, "other": 0}.get(binding_shift_direction, 0)
 
     # Weighted average (inflation 2x)
-    weighted = (infl_score * 2 + stress_score * 1 + shift_score * 1) / 4.0
+    weighted = (infl_score * 2 + pos_score * 1 + shift_score * 1) / 4.0
 
     # Classify
     if weighted > 0.25:
@@ -472,7 +481,7 @@ def compute_forward_bias(
         bias = "neutral"
 
     # Confidence based on signal agreement
-    signals = [infl_score, stress_score, shift_score]
+    signals = [infl_score, pos_score, shift_score]
     nonzero = [s for s in signals if s != 0]
     if len(nonzero) >= 2 and all(s > 0 for s in nonzero):
         confidence = "high"
@@ -1178,9 +1187,11 @@ def compute_trajectory(
     result.sector_rationale = sector_info["rationale"]
 
     # === 7. Net Forward Bias ===
+    # Uses positioning_signal (from CFTC COT) instead of stress_contrarian
+    # Stress contrarian is still computed above for backward compatibility
     bias_info = compute_forward_bias(
         result.inflation_trajectory,
-        result.stress_contrarian_signal,
+        result.positioning_signal,
         result.binding_shift_direction,
     )
     result.forward_bias = bias_info["bias"]

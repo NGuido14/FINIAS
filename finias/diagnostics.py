@@ -811,6 +811,51 @@ async def table_usage_summary(db: DatabasePool):
         print(f"  [{status:6s}] {table}: {recommendation}")
 
 
+async def check_positioning(db: DatabasePool):
+    header("9. CFTC Positioning")
+    try:
+        from finias.data.providers.cot_client import get_latest_cot, get_cot_staleness_days, COT_CONTRACTS
+        from finias.agents.macro_strategist.computations.positioning import compute_contract_positioning
+        from finias.data.providers.cot_client import get_cot_history
+
+        staleness = await get_cot_staleness_days(db)
+        latest = await get_latest_cot(db)
+
+        if not latest:
+            warn("No COT positioning data in database. Run morning refresh to fetch.")
+            return
+
+        total_row = await db.fetchrow("SELECT COUNT(*) as cnt FROM cot_positioning")
+        total = total_row["cnt"] if total_row else 0
+        ok(f"COT data: {total} records, {staleness} days since latest report")
+
+        for contract_key in COT_CONTRACTS:
+            if contract_key in latest:
+                row = latest[contract_key]
+                history = await get_cot_history(db, contract_key, lookback_weeks=156)
+                cp = compute_contract_positioning(contract_key, history)
+                crowding_label = f" ★{cp.crowding.upper()}" if cp.crowding != "neutral" else ""
+                ok(f"  {contract_key}: net={cp.net_spec:+,}, "
+                   f"percentile={cp.net_spec_percentile:.1f}, "
+                   f"crowding={cp.crowding}{crowding_label}, "
+                   f"roc_4w={cp.rate_of_change_4w:+,}, "
+                   f"weeks={cp.lookback_weeks}, confidence={cp.confidence}")
+            else:
+                warn(f"  {contract_key}: NO DATA")
+
+        if staleness > 14:
+            warn(f"  COT data is {staleness} days stale — CFTC may have a publication gap")
+        elif staleness > 10:
+            warn(f"  COT data is {staleness} days stale — slightly older than normal")
+        else:
+            ok(f"  Staleness: {staleness} days (normal)")
+
+    except Exception as e:
+        fail(f"Positioning check failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -841,6 +886,7 @@ async def main():
         await check_matrix(db)
         await check_computations(cache)
         await check_ground_truth(db, fred)
+        await check_positioning(db)
         await check_interpretation_validation(db)
         await table_usage_summary(db)
 

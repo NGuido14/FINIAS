@@ -75,6 +75,21 @@ async def main():
         except Exception as e:
             logger.warning(f"  Live price feed unavailable: {e}")
 
+        # Fetch CFTC COT positioning data (weekly — checks for new data)
+        logger.info("Checking CFTC COT positioning data...")
+        try:
+            from finias.data.providers.cot_client import fetch_and_store_cot_data
+            cot_result = await fetch_and_store_cot_data(db)
+            if cot_result.get("error"):
+                logger.warning(f"  COT fetch issue: {cot_result['error']}")
+            elif cot_result.get("new_data"):
+                logger.info(f"  COT: {cot_result['new_records']} new records "
+                           f"(latest: {cot_result['latest_date']})")
+            else:
+                logger.info(f"  COT: No new data (latest: {cot_result.get('latest_date', 'none')})")
+        except Exception as e:
+            logger.warning(f"  COT positioning unavailable: {e}")
+
         # Run the full macro pipeline with comprehensive morning prompt
         logger.info("Running full macro pipeline...")
         query = AgentQuery(

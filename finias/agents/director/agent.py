@@ -323,6 +323,34 @@ class Director(BaseAgent):
                 if opp_parts:
                     parts.append("Opportunities:\n" + "\n".join(opp_parts))
 
+            # CFTC Positioning
+            pos_data = regime.get("positioning", {})
+            pos_contracts = pos_data.get("contracts", {})
+            pos_agg = pos_data.get("aggregate", {})
+            if pos_contracts:
+                pos_parts = []
+                CONTRACT_LABELS = {
+                    "sp500": "S&P 500", "treasury_10y": "10Y Treasury",
+                    "wti_crude": "WTI Crude", "gold": "Gold", "dollar_index": "Dollar",
+                }
+                for key in ["sp500", "treasury_10y", "wti_crude", "gold", "dollar_index"]:
+                    cp = pos_contracts.get(key, {})
+                    if not cp:
+                        continue
+                    label = CONTRACT_LABELS.get(key, key)
+                    pctl = cp.get("net_spec_percentile", 50)
+                    crowding = cp.get("crowding", "neutral")
+                    flag = f" ★{crowding.upper().replace('_', ' ')}" if crowding != "neutral" else ""
+                    pos_parts.append(f"  {label}: {pctl:.0f}th percentile{flag}")
+                if pos_parts:
+                    agg_score = pos_agg.get("score", 0)
+                    signal = pos_agg.get("sp500_positioning_signal", "neutral")
+                    parts.append(
+                        f"Positioning (CFTC COT, {pos_agg.get('data_staleness_days', '?')}d stale):\n"
+                        + "\n".join(pos_parts)
+                        + f"\n  Aggregate: {agg_score:+.2f}, S&P 500 signal: {signal}"
+                    )
+
             # Regime change conditions
             rcc = interp.get("regime_change_conditions", {})
             if rcc and isinstance(rcc, dict):

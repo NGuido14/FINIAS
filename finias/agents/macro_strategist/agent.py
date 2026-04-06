@@ -653,6 +653,52 @@ class MacroStrategist(BaseAgent):
             prior_regime_assessment=prior_regime,
             prior_trigger_values=prior_trigger_values,
         )
+
+        # === CFTC Positioning Integration ===
+        # Fetch COT data from PostgreSQL and compute positioning signals.
+        # The S&P 500 positioning signal replaces stress_contrarian in forward_bias.
+        positioning_analysis = None
+        try:
+            from finias.data.providers.cot_client import get_cot_history, get_cot_staleness_days, COT_CONTRACTS
+            from finias.agents.macro_strategist.computations.positioning import (
+                compute_positioning_analysis, generate_positioning_data_notes
+            )
+
+            contract_data = {}
+            for contract_key in COT_CONTRACTS:
+                history = await get_cot_history(self.cache.db, contract_key, lookback_weeks=156)
+                if history:
+                    contract_data[contract_key] = history
+
+            if contract_data:
+                staleness = await get_cot_staleness_days(self.cache.db)
+                positioning_analysis = compute_positioning_analysis(contract_data, staleness_days=staleness)
+
+                # Update trajectory with positioning signal
+                trajectory.positioning_signal = positioning_analysis.sp500_positioning_signal
+                sp500_cp = positioning_analysis.contracts.get("sp500")
+                if sp500_cp:
+                    trajectory.sp500_net_spec_percentile = sp500_cp.net_spec_percentile
+
+                # Recompute forward_bias with positioning signal instead of stress_contrarian
+                from finias.agents.macro_strategist.computations.trajectory import compute_forward_bias
+                bias_info = compute_forward_bias(
+                    trajectory.inflation_trajectory,
+                    trajectory.positioning_signal,
+                    trajectory.binding_shift_direction,
+                )
+                trajectory.forward_bias = bias_info["bias"]
+                trajectory.forward_bias_score = bias_info["score"]
+                trajectory.forward_bias_confidence = bias_info["confidence"]
+
+                # Store positioning in regime assessment components
+                regime_assessment.positioning = positioning_analysis.to_dict()
+                self._positioning_analysis = positioning_analysis
+            else:
+                logger.info("No COT positioning data available — using stress_contrarian fallback")
+        except Exception as e:
+            logger.warning(f"Positioning computation failed (using stress_contrarian fallback): {e}")
+
         regime_assessment.trajectory = trajectory.to_dict()
         self._last_trajectory = trajectory
 
@@ -1258,7 +1304,8 @@ class MacroStrategist(BaseAgent):
         confidence = bias_info.get("confidence", "low")
         signals = traj.get("trajectory_signals", {})
         infl_traj = signals.get("inflation_trajectory", "unknown")
-        stress_sig = signals.get("stress_contrarian", "neutral")
+        pos_sig = signals.get("positioning_signal", "neutral")
+        sp500_pctl = signals.get("sp500_net_spec_percentile", 50.0)
         shifted = signals.get("binding_shifted", False)
         shift_dir = signals.get("shift_direction", "none")
 
@@ -1266,8 +1313,8 @@ class MacroStrategist(BaseAgent):
             parts = []
             if infl_traj != "unknown":
                 parts.append(f"inflation {infl_traj}")
-            if stress_sig != "neutral":
-                parts.append(f"stress {stress_sig}")
+            if pos_sig != "neutral":
+                parts.append(f"positioning {pos_sig} (S&P 500 at {sp500_pctl:.0f}th percentile)")
             if shifted:
                 parts.append(f"binding constraint shifted {shift_dir}")
             notes.append(
@@ -1438,6 +1485,13 @@ class MacroStrategist(BaseAgent):
         if corr_data and corr_data.get("pairs"):
             corr_notes = _generate_correlation_notes_from_dict(corr_data)
             notes.extend(corr_notes)
+
+        # --- CFTC Positioning ---
+        positioning = getattr(self, '_positioning_analysis', None)
+        if positioning is not None:
+            from finias.agents.macro_strategist.computations.positioning import generate_positioning_data_notes
+            pos_notes = generate_positioning_data_notes(positioning)
+            notes.extend(pos_notes)
 
         if not notes:
             return ""

@@ -175,6 +175,16 @@ async def main():
                             print(f"  Live prices fetched: {fetched_count}/7 instruments")
                         except Exception as e:
                             print(f"  Live prices unavailable: {e}")
+                        # Fetch CFTC COT positioning data
+                        try:
+                            from finias.data.providers.cot_client import fetch_and_store_cot_data
+                            cot_result = await fetch_and_store_cot_data(components["db"])
+                            if cot_result.get("new_data"):
+                                print(f"  COT positioning: {cot_result['new_records']} new records")
+                            else:
+                                print(f"  COT positioning: up to date (latest: {cot_result.get('latest_date', 'none')})")
+                        except Exception as e:
+                            print(f"  COT positioning unavailable: {e}")
                         from finias.agents.macro_strategist.prompts.refresh import MORNING_REFRESH_PROMPT
                         refresh_query = AgentQuery(
                             asking_agent="cli_refresh",

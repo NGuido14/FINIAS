@@ -52,4 +52,11 @@ MORNING_REFRESH_PROMPT = """Provide a comprehensive morning macro assessment cov
 
 Be specific. Cite exact numbers. Explain cross-domain connections. Identify conflicts between signals. Think like a macro strategist at a top hedge fund.
 
+13. POSITIONING CONTEXT (if CFTC COT data available in the data notes):
+When speculative positioning data is available, incorporate positioning extremes
+into your scenario analysis. Extreme positioning (>90th or <10th percentile)
+increases the probability and magnitude of reversal moves. Note which contracts
+are at crowding extremes and what the cross-asset positioning divergences imply
+for your scenarios.
+
 {question}"""
