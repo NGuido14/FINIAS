@@ -856,6 +856,88 @@ async def check_positioning(db: DatabasePool):
         traceback.print_exc()
 
 
+async def check_data_quality(db: DatabasePool, fred: FredClient):
+    """Section 10: Data Quality Validation."""
+    header("10. DATA QUALITY VALIDATION")
+
+    try:
+        from finias.data.validation.fred_quality import validate_all_fred, detect_fred_gaps
+        from finias.data.validation.polygon_quality import validate_all_polygon
+        from finias.data.validation.bounds import check_computation_bounds
+        from finias.data.validation.quality import CONSECUTIVE_CRITICAL
+        import json
+
+        # FRED quality
+        info("Validating FRED series...")
+        fred_report = await validate_all_fred(db)
+        fred_healthy = sum(1 for r in fred_report.series_reports.values() if r.status == "healthy")
+        fred_warning = sum(1 for r in fred_report.series_reports.values() if r.status == "warning")
+        fred_critical = sum(1 for r in fred_report.series_reports.values() if r.status == "critical")
+
+        if fred_critical == 0:
+            ok(f"FRED: {fred_healthy} healthy, {fred_warning} warning, {fred_critical} critical")
+        else:
+            warn(f"FRED: {fred_healthy} healthy, {fred_warning} warning, {fred_critical} critical")
+            for sid, r in fred_report.series_reports.items():
+                if r.status == "critical":
+                    fail(f"  {sid}: {'; '.join(r.warnings[:2])}")
+
+        # Critical series consecutive check
+        print()
+        info("Consecutive series check (gap = computation corruption):")
+        gaps = await detect_fred_gaps(db, critical_only=True)
+        if gaps:
+            for g in gaps:
+                fail(f"  {g['series_id']}: {g['gap_periods']} gap(s) between "
+                     f"{g['from_date']} and {g['to_date']} — affects {g['computation_affected']}")
+        else:
+            ok(f"  All {len(CONSECUTIVE_CRITICAL)} critical series gap-free")
+
+        # Polygon quality
+        print()
+        info("Validating Polygon symbols...")
+        poly_reports = await validate_all_polygon(db)
+        poly_healthy = sum(1 for r in poly_reports.values() if r.status == "healthy")
+        poly_stale = sum(1 for r in poly_reports.values() if r.staleness_days > 5)
+        if poly_healthy == len(poly_reports):
+            ok(f"Polygon: {poly_healthy}/{len(poly_reports)} healthy")
+        else:
+            warn(f"Polygon: {poly_healthy}/{len(poly_reports)} healthy, {poly_stale} stale (>5d)")
+
+        # Bounds check on latest regime
+        print()
+        info("Bounds check on latest regime assessment...")
+        row = await db.fetchrow(
+            "SELECT full_regime_json FROM regime_assessments ORDER BY id DESC LIMIT 1"
+        )
+        if row and row["full_regime_json"]:
+            regime = json.loads(row["full_regime_json"]) if isinstance(row["full_regime_json"], str) else row["full_regime_json"]
+            key_levels = regime.get("key_levels", {})
+            violations = check_computation_bounds(key_levels)
+            if violations:
+                for v in violations:
+                    fail(f"  {v}")
+            else:
+                ok(f"  All {len(key_levels)} key levels within bounds")
+        else:
+            warn("  No regime assessment available for bounds check")
+
+        # Overall
+        print()
+        overall = fred_report.overall_status
+        if overall == "healthy" and not gaps:
+            ok(f"Overall data quality: HEALTHY")
+        elif overall == "critical" or gaps:
+            fail(f"Overall data quality: CRITICAL — {len(fred_report.critical_issues)} issue(s)")
+        else:
+            warn(f"Overall data quality: DEGRADED — {len(fred_report.warnings)} warning(s)")
+
+    except Exception as e:
+        fail(f"Data quality validation failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -889,6 +971,7 @@ async def main():
         await check_positioning(db)
         await check_interpretation_validation(db)
         await table_usage_summary(db)
+        await check_data_quality(db, fred)
 
         # Cleanup
         await polygon.close()

@@ -300,6 +300,49 @@ class MacroStrategist(BaseAgent):
         if missing_fred:
             logger.warning(f"Missing FRED series ({len(missing_fred)}): {', '.join(missing_fred[:10])}")
 
+        # === Pre-computation data quality validation ===
+        _quality_report = None
+        _quality_warnings = []
+        try:
+            from finias.data.validation.quality import (
+                check_series_gaps, validate_series, DataQualityReport, CONSECUTIVE_CRITICAL,
+            )
+            from finias.data.validation.fred_quality import FRED_FREQUENCY
+
+            _quality_report = DataQualityReport()
+
+            for series_id, series_data in fred_data.items():
+                if series_id in CONSECUTIVE_CRITICAL and series_data:
+                    frequency = FRED_FREQUENCY.get(series_id, "monthly")
+                    report = validate_series(
+                        observations=series_data,
+                        series_id=series_id,
+                        expected_frequency=frequency,
+                        consecutive_required=True,
+                    )
+                    _quality_report.series_reports[series_id] = report
+
+                    if report.status == "critical":
+                        affected = CONSECUTIVE_CRITICAL[series_id]
+                        issue = f"{series_id}: gap detected — {affected} may be inaccurate"
+                        _quality_report.critical_issues.append(issue)
+                        _quality_warnings.append(issue)
+                        logger.warning(f"DATA QUALITY CRITICAL: {issue}")
+
+            # Determine overall status
+            if _quality_report.critical_issues:
+                _quality_report.overall_status = "critical"
+            elif missing_fred:
+                _quality_report.overall_status = "degraded"
+                _quality_report.warnings.append(
+                    f"{len(missing_fred)} FRED series returned no data"
+                )
+            else:
+                _quality_report.overall_status = "healthy"
+
+        except Exception as e:
+            logger.warning(f"Pre-computation quality check failed (non-blocking): {e}")
+
         # Populate the macro matrix from raw economic_indicators
         try:
             matrix_count = await self.cache.populate_macro_matrix()
@@ -604,6 +647,32 @@ class MacroStrategist(BaseAgent):
         if _computation_failures:
             regime_assessment._data_gaps["computation_failures"] = _computation_failures
 
+        # === Post-computation bounds check ===
+        try:
+            from finias.data.validation.bounds import check_computation_bounds
+            bounds_violations = check_computation_bounds(
+                regime_assessment.key_levels,
+                additional_values={
+                    "recession_prob": regime_assessment.key_levels.get("recession_prob"),
+                    "composite_score": regime_assessment.composite_score,
+                    "stress_index": regime_assessment.stress_index,
+                    "confidence": regime_assessment.confidence,
+                },
+            )
+            if bounds_violations:
+                for v in bounds_violations:
+                    logger.error(f"BOUNDS VIOLATION: {v}")
+                    _quality_warnings.append(v)
+                if _quality_report:
+                    _quality_report.critical_issues.extend(bounds_violations)
+                    _quality_report.overall_status = "critical"
+        except Exception as e:
+            logger.warning(f"Bounds check failed (non-blocking): {e}")
+
+        # Attach quality report and warnings to regime assessment for downstream use
+        regime_assessment._quality_report = _quality_report
+        regime_assessment._quality_warnings = _quality_warnings
+
         # === Compute Trajectory Layer ===
         # Get prior assessment for trajectory change signals
         prior_regime = None
@@ -698,6 +767,11 @@ class MacroStrategist(BaseAgent):
                 logger.info("No COT positioning data available — using stress_contrarian fallback")
         except Exception as e:
             logger.warning(f"Positioning computation failed (using stress_contrarian fallback): {e}")
+
+        # Inject quality warnings into trajectory's data_freshness_warnings
+        # These flow through to MacroContext.data_freshness_warnings for downstream agents
+        if _quality_warnings:
+            trajectory.data_freshness_warnings.extend(_quality_warnings)
 
         regime_assessment.trajectory = trajectory.to_dict()
         self._last_trajectory = trajectory
@@ -1241,6 +1315,13 @@ class MacroStrategist(BaseAgent):
                 f"or temporary. It is the normal state. Use the forward_bias field "
                 f"(constructive/neutral/cautious) for directional assessment, not the regime label."
             )
+
+        # --- Data Quality Warnings ---
+        quality_report = getattr(regime, '_quality_report', None)
+        if quality_report and quality_report.critical_issues:
+            quality_notes = quality_report.get_quality_warnings_for_notes()
+            for qn in quality_notes:
+                notes.append(f"- {qn}")
 
         # --- Data Gaps Warning ---
         # This is populated by the query() method if any FRED series or Polygon symbols are missing
@@ -2123,7 +2204,7 @@ class MacroStrategist(BaseAgent):
                 vix_level, fed_funds_rate, net_liquidity_trillion, spread_2s10s,
                 core_pce_yoy, unemployment_rate, sahm_value, ism_manufacturing,
                 hy_spread, nfci,
-                full_regime_json, interpretation_json
+                full_regime_json, interpretation_json, data_quality_json
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9,
@@ -2132,7 +2213,7 @@ class MacroStrategist(BaseAgent):
                 $18, $19, $20, $21,
                 $22, $23, $24, $25,
                 $26, $27,
-                $28, $29
+                $28, $29, $30
             )
             """,
             regime.primary_regime.value, regime.cycle_phase,
@@ -2150,6 +2231,11 @@ class MacroStrategist(BaseAgent):
             key_levels.get("hy_spread"), key_levels.get("nfci"),
             json.dumps(regime.to_dict(), default=str),  # full_regime_json — ALL 200+ fields
             json.dumps(clean_interpretation, default=str),     # interpretation_json — Claude's full analysis
+            json.dumps(
+                getattr(regime, '_quality_report', None).to_dict()
+                if getattr(regime, '_quality_report', None) else None,
+                default=str,
+            ),  # data_quality_json — quality report at assessment time
         )
 
         # Store in agent_opinions

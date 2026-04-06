@@ -90,6 +90,64 @@ async def main():
         except Exception as e:
             logger.warning(f"  COT positioning unavailable: {e}")
 
+        # === Data Quality Check + Auto-Backfill ===
+        logger.info("Running data quality validation...")
+        try:
+            from finias.data.validation.fred_quality import detect_fred_gaps, validate_all_fred
+            from finias.data.validation.quality import CONSECUTIVE_CRITICAL
+
+            # Step 1: Detect gaps in critical series
+            critical_gaps = await detect_fred_gaps(db, critical_only=True)
+
+            if critical_gaps:
+                logger.warning(f"Found {len(critical_gaps)} gap(s) in critical FRED series")
+
+                # Step 2: Attempt auto-backfill from FRED
+                for gap in critical_gaps:
+                    try:
+                        from datetime import date as _date
+                        gap_start = _date.fromisoformat(gap["from_date"])
+                        gap_end = _date.fromisoformat(gap["to_date"])
+                        obs = await fred.get_series(
+                            gap["series_id"],
+                            observation_start=gap_start,
+                            observation_end=gap_end,
+                        )
+                        if obs:
+                            for o in obs:
+                                await db.execute(
+                                    "INSERT INTO economic_indicators (series_id, obs_date, value, source) "
+                                    "VALUES ($1, $2, $3, 'fred_backfill') "
+                                    "ON CONFLICT (series_id, obs_date) DO UPDATE SET value = $3",
+                                    gap["series_id"],
+                                    _date.fromisoformat(o["date"]),
+                                    o["value"],
+                                )
+                            logger.info(f"  Auto-backfilled {gap['series_id']}: {len(obs)} observation(s)")
+                        else:
+                            logger.warning(
+                                f"  {gap['series_id']}: FRED has no data for gap "
+                                f"({gap['from_date']} → {gap['to_date']}). "
+                                f"Affects: {gap['computation_affected']}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"  {gap['series_id']}: backfill failed: {e}")
+
+                # Step 3: Re-check after backfill
+                remaining_gaps = await detect_fred_gaps(db, critical_only=True)
+                if remaining_gaps:
+                    logger.warning(
+                        f"  {len(remaining_gaps)} gap(s) remain after backfill "
+                        f"(source data unavailable)"
+                    )
+                else:
+                    logger.info("  All critical gaps resolved by auto-backfill")
+            else:
+                logger.info("  No gaps in critical FRED series")
+
+        except Exception as e:
+            logger.warning(f"  Data quality check failed (non-blocking): {e}")
+
         # Run the full macro pipeline with comprehensive morning prompt
         logger.info("Running full macro pipeline...")
         query = AgentQuery(

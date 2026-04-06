@@ -185,6 +185,18 @@ async def main():
                                 print(f"  COT positioning: up to date (latest: {cot_result.get('latest_date', 'none')})")
                         except Exception as e:
                             print(f"  COT positioning unavailable: {e}")
+                        # Data quality check
+                        try:
+                            from finias.data.validation.fred_quality import detect_fred_gaps
+                            critical_gaps = await detect_fred_gaps(components["db"], critical_only=True)
+                            if critical_gaps:
+                                print(f"  ⚠ Data quality: {len(critical_gaps)} gap(s) in critical series")
+                                for g in critical_gaps:
+                                    print(f"    {g['series_id']}: gap between {g['from_date']} and {g['to_date']}")
+                            else:
+                                print(f"  ✓ Data quality: all critical series gap-free")
+                        except Exception as e:
+                            print(f"  Data quality check unavailable: {e}")
                         from finias.agents.macro_strategist.prompts.refresh import MORNING_REFRESH_PROMPT
                         refresh_query = AgentQuery(
                             asking_agent="cli_refresh",
