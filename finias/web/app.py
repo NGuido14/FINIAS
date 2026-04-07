@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
     macro = MacroStrategist(cache=cache, state=state)
     registry.register(macro)
 
-    director = Director(registry=registry, state=state)
+    director = Director(registry=registry, state=state, db=db)
 
     _components.update({
         "db": db,

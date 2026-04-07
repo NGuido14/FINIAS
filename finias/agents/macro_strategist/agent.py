@@ -814,6 +814,20 @@ class MacroStrategist(BaseAgent):
         except Exception as e:
             logger.warning(f"Failed to persist opinion to database: {e}")
 
+        # === Compute historical trajectory for Director cached context ===
+        try:
+            from finias.agents.macro_strategist.history import compute_historical_trajectory
+            trajectory_data = await compute_historical_trajectory(self.cache.db)
+            import json as _json
+            await self.state.client.set(
+                "regime:trajectory_history",
+                _json.dumps(trajectory_data, default=str),
+                ex=50400,  # 14 hours TTL, same as regime
+            )
+            logger.info("Historical trajectory computed and stored in Redis")
+        except Exception as e:
+            logger.warning(f"Could not compute historical trajectory: {e}")
+
         # === Build opinion ===
         direction = self._regime_to_direction(
             regime_assessment.primary_regime, regime_assessment.composite_score

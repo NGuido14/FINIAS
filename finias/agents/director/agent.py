@@ -44,10 +44,11 @@ class Director(BaseAgent):
     Claude tool_use, and synthesizes grounded responses.
     """
 
-    def __init__(self, registry: ToolRegistry, state: Optional[RedisState] = None):
+    def __init__(self, registry: ToolRegistry, state: Optional[RedisState] = None, db=None):
         super().__init__()
         self.registry = registry
         self.state = state
+        self._db = db
         settings = get_settings()
         self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self._model = settings.claude_model_fast
@@ -380,6 +381,18 @@ class Director(BaseAgent):
                 if rcc_parts:
                     parts.append("Regime Change Conditions:\n" + "\n".join(rcc_parts))
 
+            # Historical trajectory (Layer 1 — pre-computed during refresh)
+            try:
+                trajectory_raw = await self.state.client.get("regime:trajectory_history")
+                if trajectory_raw:
+                    from finias.agents.macro_strategist.history import format_trajectory_for_context
+                    trajectory_data = json.loads(trajectory_raw)
+                    trajectory_str = format_trajectory_for_context(trajectory_data)
+                    if trajectory_str:
+                        parts.append(trajectory_str)
+            except Exception as e:
+                logger.warning(f"Could not load historical trajectory: {e}")
+
             return "\n".join(parts)
 
         except Exception as e:
@@ -402,6 +415,11 @@ class Director(BaseAgent):
         # Get tool definitions from registry
         tools = self.registry.get_tool_definitions()
 
+        # Add the history tool (lightweight, not a registered agent)
+        if self._db:
+            from finias.agents.macro_strategist.history import get_macro_history_tool_definition
+            tools.append(get_macro_history_tool_definition())
+
         # Prepend today's date so Claude uses correct timeframes
         from datetime import date as _date
         dated_system_prompt = f"TODAY'S DATE: {_date.today().isoformat()}. All dates and timeframes in your response must be relative to today. Do not reference 2024 or 2025 as future dates.\n\n" + DIRECTOR_SYSTEM_PROMPT
@@ -412,10 +430,16 @@ class Director(BaseAgent):
             dated_system_prompt += (
                 "\n\nYou have access to a FRESH cached macro regime assessment below. "
                 "Use this data to answer macro-related questions directly WITHOUT calling "
-                "the macro strategist tool. The data is current and comprehensive. "
-                "Only call the macro strategist tool if the user explicitly asks for a "
-                "fresh/new assessment or if the question requires analysis beyond what's "
-                "in the cached context.\n\n" + cached_context
+                "the macro strategist tool. The data is current and comprehensive.\n\n"
+                "TOOL ROUTING GUIDANCE:\n"
+                "- For current state questions: use the cached context below.\n"
+                "- For trends, changes over time, or historical comparisons: use the "
+                "HISTORICAL TRAJECTORY section in the cached context for common trends. "
+                "If the trajectory doesn't have enough detail, call query_macro_history "
+                "with the specific metrics and date range needed.\n"
+                "- For fresh re-assessment: call query_macro_strategist.\n"
+                "- query_macro_history is FREE and INSTANT — use it liberally for any "
+                "historical question the trajectory doesn't fully answer.\n\n" + cached_context
             )
             logger.info("Using cached macro context (skipping macro agent call)")
 
@@ -442,22 +466,27 @@ class Director(BaseAgent):
                 if block.type == "tool_use":
                     logger.info(f"Director calling tool: {block.name}")
                     try:
-                        opinion = await self.registry.handle_tool_call(
-                            tool_name=block.name,
-                            tool_input=block.input,
-                            calling_agent=self.name,
-                        )
-                        # Convert opinion to string for Claude
-                        result_text = json.dumps({
-                            "direction": opinion.direction.value,
-                            "confidence": opinion.confidence.value,
-                            "regime": opinion.regime.value if opinion.regime else None,
-                            "summary": opinion.summary,
-                            "key_findings": opinion.key_findings,
-                            "risks_to_view": opinion.risks_to_view,
-                            "watch_items": opinion.watch_items,
-                            "data_points": opinion.data_points,
-                        }, default=str)
+                        # Handle history tool directly (no agent, just DB query)
+                        if block.name == "query_macro_history" and self._db:
+                            from finias.agents.macro_strategist.history import query_history
+                            result_text = await query_history(self._db, block.input)
+                        else:
+                            opinion = await self.registry.handle_tool_call(
+                                tool_name=block.name,
+                                tool_input=block.input,
+                                calling_agent=self.name,
+                            )
+                            # Convert opinion to string for Claude
+                            result_text = json.dumps({
+                                "direction": opinion.direction.value,
+                                "confidence": opinion.confidence.value,
+                                "regime": opinion.regime.value if opinion.regime else None,
+                                "summary": opinion.summary,
+                                "key_findings": opinion.key_findings,
+                                "risks_to_view": opinion.risks_to_view,
+                                "watch_items": opinion.watch_items,
+                                "data_points": opinion.data_points,
+                            }, default=str)
                     except Exception as e:
                         logger.error(f"Tool call failed: {block.name}: {e}")
                         result_text = json.dumps({

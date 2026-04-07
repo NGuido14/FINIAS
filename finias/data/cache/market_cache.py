@@ -61,11 +61,55 @@ class MarketDataCache:
                 """,
                 symbol, from_date, to_date
             )
-
             if rows:
-                return [dict(r) for r in rows]
+                # Staleness check: if latest bar is > 2 calendar days old, refetch
+                # (2 calendar days accounts for weekends — Friday data checked on Sunday is OK)
+                latest_bar_date = rows[-1]["trade_date"]
+                days_stale = (date.today() - latest_bar_date).days
+                if days_stale <= 1:
+                    return [dict(r) for r in rows]
+                else:
+                    logger.info(
+                        f"Polygon cache stale for {symbol}: latest bar {latest_bar_date} "
+                        f"is {days_stale} days old. Refreshing from Polygon."
+                    )
+                    # Only fetch the missing days, not the entire history
+                    fetch_from = latest_bar_date + timedelta(days=1)
+                    logger.info(f"Fetching {symbol} bars from Polygon: {fetch_from} to {to_date}")
+                    bars = await self.polygon.get_daily_bars(symbol, fetch_from, to_date)
+                    if bars:
+                        async with self.db.acquire() as conn:
+                            for bar in bars:
+                                bar_date = datetime.fromtimestamp(bar["t"] / 1000, tz=timezone.utc).date()
+                                await conn.execute(
+                                    """
+                                    INSERT INTO market_data_daily
+                                        (symbol, trade_date, open, high, low, close, volume, vwap, num_trades)
+                                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                                    ON CONFLICT (symbol, trade_date) DO UPDATE SET
+                                        open = EXCLUDED.open, high = EXCLUDED.high,
+                                        low = EXCLUDED.low, close = EXCLUDED.close,
+                                        volume = EXCLUDED.volume, vwap = EXCLUDED.vwap,
+                                        num_trades = EXCLUDED.num_trades
+                                    """,
+                                    symbol, bar_date,
+                                    bar.get("o"), bar.get("h"), bar.get("l"), bar.get("c"),
+                                    bar.get("v"), bar.get("vw"), bar.get("n")
+                                )
+                        await self.state.mark_data_fresh(f"polygon:{symbol}")
+                    # Return full history from database (original from_date preserved)
+                    rows = await self.db.fetch(
+                        """
+                        SELECT trade_date, open, high, low, close, volume, vwap
+                        FROM market_data_daily
+                        WHERE symbol = $1 AND trade_date BETWEEN $2 AND $3
+                        ORDER BY trade_date ASC
+                        """,
+                        symbol, from_date, to_date
+                    )
+                    return [dict(r) for r in rows]
 
-        # Fetch from Polygon
+        # Fetch from Polygon (only reached on force_refresh or no cached data at all)
         logger.info(f"Fetching {symbol} bars from Polygon: {from_date} to {to_date}")
         bars = await self.polygon.get_daily_bars(symbol, from_date, to_date)
 
@@ -142,7 +186,7 @@ class MarketDataCache:
         if series_id in daily_series:
             stale_days = 2
         elif series_id in weekly_series:
-            stale_days = 10
+            stale_days = 8
         else:
             stale_days = 40  # Monthly data: ~30 days between releases + buffer
 
