@@ -269,26 +269,28 @@ class Director(BaseAgent):
                 leading = rotation.get("leading", [])
                 lagging = rotation.get("lagging", [])
                 # Show leading sectors
-                if leading:
-                    lead_lines = []
-                    for sym in leading[:3]:
-                        rets = sector_returns.get(sym, {})
-                        name = NAMES.get(sym, sym)
-                        r5 = f"{rets.get('5d', 0):+.1f}%" if '5d' in rets else "N/A"
-                        r20 = f"{rets.get('20d', 0):+.1f}%" if '20d' in rets else "N/A"
-                        r60 = f"{rets.get('60d', 0):+.1f}%" if '60d' in rets else "N/A"
-                        lead_lines.append(f"  {name} ({sym}): 5d={r5}, 20d={r20}, 60d={r60}")
-                    parts.append("Leading Sectors (absolute returns):\n" + "\n".join(lead_lines))
-                if lagging:
-                    lag_lines = []
-                    for sym in lagging[:3]:
-                        rets = sector_returns.get(sym, {})
-                        name = NAMES.get(sym, sym)
-                        r5 = f"{rets.get('5d', 0):+.1f}%" if '5d' in rets else "N/A"
-                        r20 = f"{rets.get('20d', 0):+.1f}%" if '20d' in rets else "N/A"
-                        r60 = f"{rets.get('60d', 0):+.1f}%" if '60d' in rets else "N/A"
-                        lag_lines.append(f"  {name} ({sym}): 5d={r5}, 20d={r20}, 60d={r60}")
-                    parts.append("Lagging Sectors (absolute returns):\n" + "\n".join(lag_lines))
+                sorted_sectors = sorted(
+                    sector_returns.items(),
+                    key=lambda x: x[1].get("20d", 0) if isinstance(x[1], dict) else 0,
+                    reverse=True
+                )
+                all_sector_lines = []
+                for sym, rets in sorted_sectors:
+                    if not isinstance(rets, dict):
+                        continue
+                    name = NAMES.get(sym, sym)
+                    r5 = f"{rets.get('5d', 0):+.1f}%" if '5d' in rets else "N/A"
+                    r20 = f"{rets.get('20d', 0):+.1f}%" if '20d' in rets else "N/A"
+                    r60 = f"{rets.get('60d', 0):+.1f}%" if '60d' in rets else "N/A"
+                    label = " ★LEAD" if sym in leading else " ▼LAG" if sym in lagging else ""
+                    all_sector_lines.append(f"  {name} ({sym}): 5d={r5}, 20d={r20}, 60d={r60}{label}")
+                if all_sector_lines:
+                    parts.append("All Sector Returns (ranked by 20d, Python-computed):\n" + "\n".join(all_sector_lines))
+            parts.append(
+                "DATA BOUNDARY: Sector returns above are 5-day, 20-day, and 60-day ONLY. "
+                "Do NOT cite YTD, 1-year, or other timeframes unless you query the "
+                "query_macro_history tool first with the specific sector ETF symbols."
+            )
 
             # Forward-looking intelligence from interpretation
             if interp.get("scenarios"):
