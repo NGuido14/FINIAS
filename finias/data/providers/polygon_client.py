@@ -26,11 +26,12 @@ class PolygonClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        max_calls_per_minute: int = 5,
+        max_calls_per_minute: Optional[int] = None,
     ):
-        self.api_key = api_key or get_settings().polygon_api_key
-        self.max_calls_per_minute = max_calls_per_minute
-        self._semaphore = asyncio.Semaphore(max_calls_per_minute)
+        settings = get_settings()
+        self.api_key = api_key or settings.polygon_api_key
+        self.max_calls_per_minute = max_calls_per_minute or settings.polygon_rate_limit
+        self._semaphore = asyncio.Semaphore(self.max_calls_per_minute)
         self._session: Optional[aiohttp.ClientSession] = None
         self._call_times: list[float] = []
 

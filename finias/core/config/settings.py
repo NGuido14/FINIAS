@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     polygon_api_key: str = ""
     fred_api_key: str = ""
 
+    # Polygon Configuration
+    polygon_rate_limit: int = 5  # API calls per minute (5=free, 100+=paid)
+
     # Claude Configuration
     claude_model: str = "claude-opus-4-20250514"
     claude_model_fast: str = "claude-sonnet-4-20250514"

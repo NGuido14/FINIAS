@@ -19,12 +19,16 @@ from finias.data.validation.quality import (
 logger = logging.getLogger("finias.data.validation.polygon")
 
 
-# Expected Polygon symbols
+# Expected Polygon symbols — the original 19 macro ETFs.
+# For full universe validation, pass symbols from the universe module.
 EXPECTED_SYMBOLS = [
     "SPY", "XLF", "XLK", "XLE", "XLV", "XLI", "XLP", "XLU",
     "XLC", "XLY", "XLRE", "XLB", "RSP", "IWM", "TLT", "GLD",
     "HYG", "EEM", "CPER",
 ]
+
+# Macro ETFs are critical — these must always have data.
+CRITICAL_SYMBOLS = list(EXPECTED_SYMBOLS)
 
 
 async def validate_price_bars(
@@ -137,14 +141,25 @@ async def validate_all_polygon(
     db,
     symbols: list[str] = None,
     lookback_days: int = 365,
+    critical_only: bool = False,
 ) -> dict[str, SeriesQualityReport]:
     """
-    Validate all Polygon symbols.
+    Validate Polygon symbols.
 
-    Returns dict of symbol → SeriesQualityReport.
+    Args:
+        db: DatabasePool instance.
+        symbols: List of symbols to validate. Defaults to EXPECTED_SYMBOLS (19 ETFs).
+                 For full universe validation, pass symbols from universe module.
+        lookback_days: How far back to check.
+        critical_only: If True, only validate CRITICAL_SYMBOLS (macro ETFs).
+
+    Returns dict of symbol -> SeriesQualityReport.
     """
     if symbols is None:
-        symbols = EXPECTED_SYMBOLS
+        if critical_only:
+            symbols = CRITICAL_SYMBOLS
+        else:
+            symbols = EXPECTED_SYMBOLS
 
     reports = {}
     for symbol in symbols:

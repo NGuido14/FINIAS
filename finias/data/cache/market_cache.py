@@ -363,6 +363,109 @@ class MarketDataCache:
 
         return [dict(r) for r in rows]
 
+    async def get_batch_daily_bars(
+        self,
+        symbols: list[str],
+        from_date: date,
+        to_date: date = None,
+    ) -> dict[str, list[dict]]:
+        """
+        Batch-load OHLCV bars for multiple symbols in a single DB query.
+
+        This is the primary data access method for agents processing many symbols
+        (e.g., Technical Analyst scanning 500 symbols). Unlike get_daily_bars(),
+        this does NOT trigger Polygon fetches for missing/stale data. It reads
+        only what is in PostgreSQL. Data freshness is managed separately by
+        the seeding/refresh scripts.
+
+        Args:
+            symbols: List of ticker symbols to load.
+            from_date: Start date for data window.
+            to_date: End date (defaults to today).
+
+        Returns:
+            Dict mapping symbol -> list of bar dicts, each with:
+            {trade_date, open, high, low, close, volume, vwap}
+            Bars are sorted chronologically (oldest first) per symbol.
+            Symbols with no data in the range are omitted from the dict.
+        """
+        to_date = to_date or date.today()
+
+        rows = await self.db.fetch(
+            """
+            SELECT symbol, trade_date, open, high, low, close, volume, vwap
+            FROM market_data_daily
+            WHERE symbol = ANY($1) AND trade_date BETWEEN $2 AND $3
+            ORDER BY symbol, trade_date ASC
+            """,
+            symbols, from_date, to_date
+        )
+
+        # Partition by symbol
+        result: dict[str, list[dict]] = {}
+        for row in rows:
+            sym = row["symbol"]
+            if sym not in result:
+                result[sym] = []
+            result[sym].append(dict(row))
+
+        loaded = len(result)
+        total_bars = len(rows)
+        missing = len(symbols) - loaded
+        if missing > 0:
+            logger.warning(
+                f"Batch load: {loaded}/{len(symbols)} symbols loaded "
+                f"({total_bars} total bars), {missing} symbols had no data"
+            )
+        else:
+            logger.info(
+                f"Batch load: {loaded} symbols, {total_bars} total bars"
+            )
+
+        return result
+
+    async def get_universe_staleness(
+        self,
+        symbols: list[str],
+    ) -> dict[str, dict]:
+        """
+        Check data freshness for a list of symbols.
+
+        Returns dict mapping symbol -> {latest_date, days_stale, bar_count}.
+        Symbols with no data are included with latest_date=None.
+        """
+        rows = await self.db.fetch(
+            """
+            SELECT symbol, MAX(trade_date) as latest, COUNT(*) as bar_count
+            FROM market_data_daily
+            WHERE symbol = ANY($1)
+            GROUP BY symbol
+            """,
+            symbols,
+        )
+
+        staleness = {}
+        found = set()
+        for row in rows:
+            sym = row["symbol"]
+            found.add(sym)
+            latest = row["latest"]
+            staleness[sym] = {
+                "latest_date": latest,
+                "days_stale": (date.today() - latest).days if latest else None,
+                "bar_count": row["bar_count"],
+            }
+
+        for sym in symbols:
+            if sym not in found:
+                staleness[sym] = {
+                    "latest_date": None,
+                    "days_stale": None,
+                    "bar_count": 0,
+                }
+
+        return staleness
+
     def extract_series_from_matrix(
         self,
         matrix_rows: list[dict],
