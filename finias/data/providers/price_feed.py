@@ -136,6 +136,86 @@ async def get_live_prices(state) -> Optional[dict]:
     return None
 
 
+# yfinance → FRED series mapping for backfill
+YFINANCE_TO_FRED = {
+    "wti": ("DCOILWTICO", "Crude Oil Prices: WTI (yfinance backfill)"),
+    "brent": ("DCOILBRENTEU", "Crude Oil Prices: Brent (yfinance backfill)"),
+    "vix": ("VIXCLS", "CBOE Volatility Index (yfinance backfill)"),
+    "dxy": ("DTWEXBGS", "Nominal Broad US Dollar Index (yfinance backfill)"),
+}
+
+
+async def backfill_from_live_prices(db, state) -> dict:
+    """
+    Write current yfinance prices into economic_indicators to fill
+    FRED publication gaps.
+
+    FRED daily series (oil, VIX, DXY) lag 4-8 days. yfinance has
+    current values. This function bridges the gap by inserting today's
+    yfinance price into economic_indicators. The existing
+    populate_macro_matrix() then picks it up automatically.
+
+    Tagged with source='yfinance_backfill' so real FRED data can
+    overwrite it later via ON CONFLICT DO UPDATE.
+
+    Args:
+        db: DatabasePool instance
+        state: RedisState instance (to read prices:live)
+
+    Returns:
+        dict with status per series: {"DCOILWTICO": 96.55, ...} or errors
+    """
+    import json
+    from datetime import date
+
+    result = {}
+
+    try:
+        raw = await state.client.get(PRICES_REDIS_KEY)
+        if not raw:
+            logger.warning("No live prices in Redis — cannot backfill")
+            return {"status": "no_live_prices"}
+
+        prices = json.loads(raw)
+        today = date.today()
+        backfilled = 0
+
+        for yf_key, (fred_series, series_name) in YFINANCE_TO_FRED.items():
+            price = prices.get(yf_key)
+            if price is None:
+                result[fred_series] = "skipped (None)"
+                continue
+
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO economic_indicators
+                        (series_id, obs_date, value, series_name, source)
+                    VALUES ($1, $2, $3, $4, 'yfinance_backfill')
+                    ON CONFLICT (series_id, obs_date) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        series_name = EXCLUDED.series_name,
+                        source = EXCLUDED.source
+                    """,
+                    fred_series, today, float(price), series_name
+                )
+                result[fred_series] = float(price)
+                backfilled += 1
+                logger.info(f"Backfilled {fred_series} = {price} for {today}")
+            except Exception as e:
+                result[fred_series] = f"error: {e}"
+                logger.warning(f"Failed to backfill {fred_series}: {e}")
+
+        result["backfilled_count"] = backfilled
+        result["date"] = str(today)
+
+    except Exception as e:
+        logger.error(f"Backfill from live prices failed: {e}")
+        result["error"] = str(e)
+
+    return result
+
+
 async def get_current_prices(state, max_age_seconds: int = 300) -> dict:
     """
     Get the freshest available prices for decision-making.

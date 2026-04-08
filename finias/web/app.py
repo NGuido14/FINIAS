@@ -237,11 +237,17 @@ async def refresh():
         # Fetch live prices
         price_status = "unavailable"
         try:
-            from finias.data.providers.price_feed import fetch_live_prices, store_live_prices
+            from finias.data.providers.price_feed import fetch_live_prices, store_live_prices, backfill_from_live_prices
             lp = await fetch_live_prices()
             await store_live_prices(state, lp)
             fetched = sum(1 for k, v in lp.items() if k not in ("fetched_at", "source", "error") and v is not None)
             price_status = f"{fetched}/7 instruments"
+            # Backfill FRED gaps with yfinance values
+            backfill_result = await backfill_from_live_prices(db, state)
+            bf_count = backfill_result.get("backfilled_count", 0)
+            if bf_count > 0:
+                price_status += f" (+{bf_count} backfilled)"
+                logger.info(f"Backfilled {bf_count} FRED gaps from yfinance")
         except Exception as e:
             price_status = f"error: {e}"
 

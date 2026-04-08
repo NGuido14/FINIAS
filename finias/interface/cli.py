@@ -168,11 +168,16 @@ async def main():
                     if macro:
                         # Fetch live prices first
                         try:
-                            from finias.data.providers.price_feed import fetch_live_prices, store_live_prices
+                            from finias.data.providers.price_feed import fetch_live_prices, store_live_prices, backfill_from_live_prices
                             lp = await fetch_live_prices()
                             await store_live_prices(components["state"], lp)
                             fetched_count = sum(1 for k, v in lp.items() if k not in ("fetched_at", "source", "error") and v is not None)
                             print(f"  Live prices fetched: {fetched_count}/7 instruments")
+                            # Backfill FRED gaps with yfinance values
+                            backfill_result = await backfill_from_live_prices(components["db"], components["state"])
+                            bf_count = backfill_result.get("backfilled_count", 0)
+                            if bf_count > 0:
+                                print(f"  FRED gaps backfilled: {bf_count} series (oil, VIX, DXY)")
                         except Exception as e:
                             print(f"  Live prices unavailable: {e}")
                         # Fetch CFTC COT positioning data
