@@ -127,6 +127,102 @@ async def chat(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/tickers")
+async def search_tickers(q: str = ""):
+    """Search available tickers from the database."""
+    db = _components.get("db")
+    if not db:
+        return JSONResponse({"tickers": []})
+
+    try:
+        if q:
+            rows = await db.fetch(
+                "SELECT DISTINCT symbol FROM market_data_daily WHERE UPPER(symbol) LIKE $1 ORDER BY symbol LIMIT 8",
+                f"%{q.upper()}%"
+            )
+        else:
+            rows = await db.fetch(
+                "SELECT DISTINCT symbol FROM market_data_daily ORDER BY symbol LIMIT 8"
+            )
+        return JSONResponse({"tickers": [r["symbol"] for r in rows]})
+    except Exception as e:
+        logger.error(f"Ticker search error: {e}")
+        return JSONResponse({"tickers": []})
+
+
+@app.get("/api/stock/{symbol}")
+async def get_stock_data(symbol: str):
+    """Get full price history and stats for a single stock."""
+    db = _components.get("db")
+    if not db:
+        return JSONResponse({"error": "DB not initialized"}, status_code=503)
+
+    try:
+        symbol = symbol.upper()
+
+        # Get all price history
+        rows = await db.fetch(
+            """SELECT trade_date, open, high, low, close, volume
+            FROM market_data_daily
+            WHERE symbol = $1
+            ORDER BY trade_date ASC""",
+            symbol
+        )
+
+        if not rows:
+            return JSONResponse({"error": f"No data for {symbol}"}, status_code=404)
+
+        prices = [{"date": str(r["trade_date"]), "open": float(r["open"]) if r["open"] else None,
+                    "high": float(r["high"]) if r["high"] else None, "low": float(r["low"]) if r["low"] else None,
+                    "close": float(r["close"]) if r["close"] else None,
+                    "volume": int(r["volume"]) if r["volume"] else 0} for r in rows]
+
+        latest = prices[-1]["close"] if prices else 0
+        latest_date = prices[-1]["date"] if prices else ""
+        latest_vol = prices[-1]["volume"] if prices else 0
+
+        # Compute returns for various timeframes
+        def pct_change(days_back):
+            if len(prices) <= days_back:
+                return None
+            old = prices[-(days_back + 1)]["close"]
+            if old and old > 0:
+                return round((latest - old) / old * 100, 2)
+            return None
+
+        # High/low over last year
+        year_prices = [p["close"] for p in prices[-252:] if p["close"]]
+        high_52w = max(year_prices) if year_prices else None
+        low_52w = min(year_prices) if year_prices else None
+
+        # Average volume 20d
+        recent_vols = [p["volume"] for p in prices[-20:] if p["volume"]]
+        avg_vol_20d = int(sum(recent_vols) / len(recent_vols)) if recent_vols else 0
+
+        return JSONResponse({
+            "symbol": symbol,
+            "latest_price": latest,
+            "latest_date": latest_date,
+            "volume": latest_vol,
+            "avg_volume_20d": avg_vol_20d,
+            "high_52w": high_52w,
+            "low_52w": low_52w,
+            "returns": {
+                "1d": pct_change(1),
+                "5d": pct_change(5),
+                "1m": pct_change(21),
+                "3m": pct_change(63),
+                "6m": pct_change(126),
+                "1y": pct_change(252),
+                "ytd": None,  # Would need Jan 1 lookup
+            },
+            "prices": prices,
+        })
+    except Exception as e:
+        logger.error(f"Stock data error for {symbol}: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/api/refresh")
 async def refresh():
     """Run a full macro refresh."""
