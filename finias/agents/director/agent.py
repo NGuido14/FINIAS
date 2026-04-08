@@ -351,6 +351,30 @@ class Director(BaseAgent):
                 )
                 parts.append("\n".join(corr_lines))
 
+            # Breadth participation
+            participation = breadth.get("sector_participation", {})
+            if participation:
+                pct_200 = participation.get("pct_above_200ma")
+                pct_50 = participation.get("pct_above_50ma")
+                above_200 = participation.get("above_200ma")
+                above_50 = participation.get("above_50ma")
+                total = 11  # 11 sector ETFs
+                breadth_lines = ["Market Breadth Participation (Python-computed):"]
+                if pct_200 is not None:
+                    breadth_lines.append(f"  Sectors above 200-day MA: {above_200}/{total} ({pct_200:.1f}%)")
+                if pct_50 is not None:
+                    breadth_lines.append(f"  Sectors above 50-day MA: {above_50}/{total} ({pct_50:.1f}%)")
+                breadth_health = breadth.get("breadth_health", "unknown")
+                breadth_score = breadth.get("breadth_score")
+                if breadth_score is not None:
+                    breadth_lines.append(f"  Breadth health: {breadth_health}, score: {breadth_score:.2f}")
+                breadth_lines.append(
+                    "  BREADTH BOUNDARY: ONLY cite the participation numbers above. "
+                    "Do NOT invent breadth statistics, advance/decline ratios, or "
+                    "participation percentages not listed here."
+                )
+                parts.append("\n".join(breadth_lines))
+
             # Forward-looking intelligence from interpretation
             if interp.get("scenarios"):
                 scenario_parts = []
@@ -481,6 +505,12 @@ class Director(BaseAgent):
             from finias.agents.macro_strategist.history import get_macro_history_tool_definition
             tools.append(get_macro_history_tool_definition())
 
+        # Add web search — lets the Director research events, policy, context
+        tools.append({
+            "type": "web_search_20250305",
+            "name": "web_search",
+        })
+
         # Prepend today's date so Claude uses correct timeframes
         from datetime import date as _date
         dated_system_prompt = f"TODAY'S DATE: {_date.today().isoformat()}. All dates and timeframes in your response must be relative to today. Do not reference 2024 or 2025 as future dates.\n\n" + DIRECTOR_SYSTEM_PROMPT
@@ -525,6 +555,9 @@ class Director(BaseAgent):
 
             for block in assistant_content:
                 if block.type == "tool_use":
+                    # Web search is handled server-side by Anthropic API — skip local routing
+                    if block.name == "web_search":
+                        continue
                     logger.info(f"Director calling tool: {block.name}")
                     try:
                         # Handle history tool directly (no agent, just DB query)
