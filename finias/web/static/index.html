@@ -652,7 +652,8 @@ async function doRefresh() {
     btn.classList.remove('loading');
     setTimeout(() => {
       txt.textContent = 'CONNECTED';
-      txt.style.color = '#555';
+      txt.style.color = '#00E5A0';
+      dot.style.background = '';
       dot.className = 'status-dot status-live';
     }, 5000);
   }

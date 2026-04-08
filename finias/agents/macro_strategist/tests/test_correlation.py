@@ -23,12 +23,16 @@ from finias.agents.macro_strategist.computations.correlation import (
 
 def _make_polygon_prices(values):
     """Create Polygon-format prices from a list of close values."""
-    return [{"close": v} for v in values]
+    from datetime import date, timedelta
+    base = date(2024, 1, 1)
+    return [{"close": v, "t": int((base + timedelta(days=i)).strftime("%s")) * 1000} for i, v in enumerate(values)]
 
 
 def _make_fred_series(values):
     """Create FRED-format series from a list of values."""
-    return [{"value": v} for v in values]
+    from datetime import date, timedelta
+    base = date(2024, 1, 1)
+    return [{"value": v, "date": (base + timedelta(days=i)).isoformat()} for i, v in enumerate(values)]
 
 
 def _generate_prices(n, seed=42, drift=0.0003, vol=0.01, start=100.0):
@@ -602,3 +606,80 @@ class TestPairCorrelationToDict:
         assert d["beta"]["beta_60d"] is None
         assert d["convexity"]["score"] is None
         assert d["regime_label"] is None
+
+
+# ============================================================================
+# Date Alignment Tests
+# ============================================================================
+
+
+def test_align_and_compute_log_returns_basic():
+    """Date alignment should produce returns only on common dates."""
+    from finias.agents.macro_strategist.computations.correlation import _align_and_compute_log_returns
+    from datetime import date, timedelta
+
+    base = date(2025, 1, 1)
+    # Series A: every day for 70 days
+    a = [(base + timedelta(days=i), 100 + i * 0.5) for i in range(70)]
+    # Series B: every day but skip days 10, 20, 30
+    b = [(base + timedelta(days=i), 200 + i * 0.3) for i in range(70) if i not in (10, 20, 30)]
+
+    ret_a, ret_b, _ = _align_and_compute_log_returns(a, b)
+    assert ret_a is not None
+    assert len(ret_a) == len(ret_b)
+    # Should have 67 common dates → 66 returns, then valid consecutive returns
+    assert len(ret_a) >= 60
+
+
+def test_align_and_compute_log_returns_insufficient():
+    """Should return None when fewer than 61 common dates."""
+    from finias.agents.macro_strategist.computations.correlation import _align_and_compute_log_returns
+    from datetime import date, timedelta
+
+    base = date(2025, 1, 1)
+    a = [(base + timedelta(days=i), 100 + i) for i in range(30)]
+    b = [(base + timedelta(days=i), 200 + i) for i in range(30)]
+
+    ret_a, ret_b, _ = _align_and_compute_log_returns(a, b)
+    assert ret_a is None
+
+
+def test_align_and_compute_log_returns_no_overlap():
+    """Should return None when series have no common dates."""
+    from finias.agents.macro_strategist.computations.correlation import _align_and_compute_log_returns
+    from datetime import date, timedelta
+
+    base_a = date(2025, 1, 1)
+    base_b = date(2025, 6, 1)
+    a = [(base_a + timedelta(days=i), 100 + i) for i in range(70)]
+    b = [(base_b + timedelta(days=i), 200 + i) for i in range(70)]
+
+    ret_a, ret_b, _ = _align_and_compute_log_returns(a, b)
+    assert ret_a is None
+
+
+def test_extract_dates_and_values_price():
+    """Should extract dates from Polygon-style dicts."""
+    from finias.agents.macro_strategist.computations.correlation import _extract_dates_and_values_price
+    from datetime import datetime
+
+    prices = [
+        {"t": int(datetime(2025, 1, i).timestamp() * 1000), "c": 100.0 + i}
+        for i in range(1, 10)
+    ]
+    result = _extract_dates_and_values_price(prices)
+    assert len(result) == 9
+    assert result[0][1] == 101.0
+
+
+def test_extract_dates_and_values_fred():
+    """Should extract dates from FRED-style dicts."""
+    from finias.agents.macro_strategist.computations.correlation import _extract_dates_and_values_fred
+
+    series = [
+        {"date": f"2025-01-{i:02d}", "value": 50.0 + i}
+        for i in range(1, 10)
+    ]
+    result = _extract_dates_and_values_fred(series)
+    assert len(result) == 9
+    assert result[0][1] == 51.0

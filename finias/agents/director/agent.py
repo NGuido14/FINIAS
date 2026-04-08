@@ -292,6 +292,65 @@ class Director(BaseAgent):
                 "query_macro_history tool first with the specific sector ETF symbols."
             )
 
+            # Cross-asset correlations
+            corr_data = components.get("cross_asset", {}).get("correlations", {})
+            corr_pairs = corr_data.get("pairs", {})
+            if corr_pairs:
+                corr_lines = [
+                    "\nCROSS-ASSET CORRELATIONS (Python-computed — cite these EXACT numbers, "
+                    "do NOT invent or estimate correlation values):"
+                ]
+                for pair_name, pair_data in corr_pairs.items():
+                    rc = pair_data.get("rolling_correlations", {})
+                    assets = pair_data.get("assets", {})
+                    a_name = assets.get("a", "?")
+                    b_name = assets.get("b", "?")
+                    c20 = rc.get("corr_20d")
+                    c60 = rc.get("corr_60d")
+                    c120 = rc.get("corr_120d")
+                    trend = rc.get("trend", "")
+                    pctl = rc.get("percentile_vs_1y")
+                    regime_label = pair_data.get("regime_label", "")
+                    beta_data = pair_data.get("beta", {})
+                    b60 = beta_data.get("beta_60d")
+
+                    parts_line = f"  {a_name} vs {b_name}:"
+                    if c20 is not None:
+                        parts_line += f" 20d={c20:+.3f}"
+                    if c60 is not None:
+                        parts_line += f", 60d={c60:+.3f}"
+                    if c120 is not None:
+                        parts_line += f", 120d={c120:+.3f}"
+                    if b60 is not None:
+                        parts_line += f" (beta={b60:+.3f})"
+                    if trend:
+                        parts_line += f" trend={trend}"
+                    if pctl is not None:
+                        parts_line += f" ({pctl:.0f}th pctl vs 1Y)"
+                    if regime_label:
+                        parts_line += f" [{regime_label}]"
+                    corr_lines.append(parts_line)
+
+                agg = corr_data.get("aggregate", {})
+                avg_corr = agg.get("avg_absolute_correlation")
+                div_regime = agg.get("diversification_regime")
+                stress_ct = agg.get("stress_coupling_count", 0)
+                if avg_corr is not None:
+                    corr_lines.append(
+                        f"  Aggregate: avg |corr|={avg_corr:.3f}, "
+                        f"diversification={div_regime}, "
+                        f"stress_couplings={stress_ct}"
+                    )
+
+                corr_lines.append(
+                    "  CORRELATION BOUNDARY: These are the ONLY 7 pairs computed. "
+                    "Do NOT cite correlations for pairs not listed (e.g. Oil vs QQQ, "
+                    "Oil vs XLE, VIX vs SPY). If asked about an unlisted pair, "
+                    "state that it is not currently computed and offer to describe "
+                    "the available pairs instead."
+                )
+                parts.append("\n".join(corr_lines))
+
             # Forward-looking intelligence from interpretation
             if interp.get("scenarios"):
                 scenario_parts = []

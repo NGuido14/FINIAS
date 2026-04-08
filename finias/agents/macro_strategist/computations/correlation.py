@@ -383,6 +383,113 @@ class CorrelationMatrix:
 # ============================================================================
 
 
+def _extract_dates_and_values_price(prices: list[dict]) -> list[tuple]:
+    """Extract (date, close_price) from Polygon-style price dicts."""
+    from datetime import date as date_type, datetime
+    result = []
+    for p in prices:
+        close = p.get("close") or p.get("c")
+        if close is None:
+            continue
+        t = p.get("t") or p.get("date") or p.get("trade_date")
+        if t is None:
+            continue
+        if isinstance(t, (int, float)):
+            # Polygon timestamp in milliseconds
+            d = datetime.fromtimestamp(t / 1000).date()
+        elif isinstance(t, str):
+            d = datetime.fromisoformat(t).date() if "T" in t else date_type.fromisoformat(t)
+        elif isinstance(t, date_type):
+            d = t
+        else:
+            continue
+        result.append((d, float(close)))
+    return result
+
+
+def _extract_dates_and_values_fred(series: list[dict]) -> list[tuple]:
+    """Extract (date, value) from FRED-style series dicts."""
+    from datetime import date as date_type, datetime
+    result = []
+    for p in series:
+        val = p.get("value")
+        if val is None:
+            continue
+        try:
+            val = float(val)
+        except (ValueError, TypeError):
+            continue
+        d = p.get("date") or p.get("obs_date")
+        if d is None:
+            continue
+        if isinstance(d, str):
+            d = date_type.fromisoformat(d)
+        elif not isinstance(d, date_type):
+            continue
+        result.append((d, val))
+    return result
+
+
+def _align_and_compute_log_returns(
+    series_a: list[tuple],
+    series_b: list[tuple],
+    vix_series: list[tuple] = None,
+) -> tuple:
+    """
+    Date-align two series and compute log returns on common dates only.
+
+    Args:
+        series_a: list of (date, value) tuples, ascending
+        series_b: list of (date, value) tuples, ascending
+        vix_series: optional list of (date, value) tuples for VIX levels
+
+    Returns:
+        (returns_a, returns_b, vix_levels) as numpy arrays, or (None, None, None) if insufficient data.
+        Returns are computed only on consecutive common dates.
+    """
+    # Build date → value maps
+    map_a = {d: v for d, v in series_a}
+    map_b = {d: v for d, v in series_b}
+    map_vix = {d: v for d, v in vix_series} if vix_series else None
+
+    # Find common dates
+    common = sorted(set(map_a.keys()) & set(map_b.keys()))
+    if map_vix is not None:
+        common = sorted(set(common) & set(map_vix.keys()))
+
+    if len(common) < 61:  # Need 60 returns = 61 observations
+        return None, None, None
+
+    # Extract aligned values
+    vals_a = np.array([map_a[d] for d in common])
+    vals_b = np.array([map_b[d] for d in common])
+
+    # Compute log returns
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ret_a = np.diff(np.log(vals_a))
+        ret_b = np.diff(np.log(vals_b))
+
+    # Clean NaN/inf
+    mask = np.isfinite(ret_a) & np.isfinite(ret_b)
+
+    vix_levels = None
+    if map_vix is not None:
+        vix_vals = np.array([map_vix[d] for d in common])
+        # VIX levels align with the second date of each return pair
+        vix_levels = vix_vals[1:]
+        mask = mask & np.isfinite(vix_levels)
+
+    ret_a = ret_a[mask]
+    ret_b = ret_b[mask]
+    if vix_levels is not None:
+        vix_levels = vix_levels[mask]
+
+    if len(ret_a) < 60:
+        return None, None, None
+
+    return ret_a, ret_b, vix_levels
+
+
 def _compute_pair(
     name: str,
     label_a: str,
@@ -680,64 +787,78 @@ def compute_correlation_matrix(
     Returns:
         CorrelationMatrix with all pair analytics and aggregate stats
     """
-    # Convert inputs to log returns
-    spy_ret = _price_to_log_returns(spy)
-    tlt_ret = _price_to_log_returns(tlt)
-    gld_ret = _price_to_log_returns(gld)
-    hyg_ret = _price_to_log_returns(hyg)
-    oil_ret = _fred_to_log_returns(oil)
-    dxy_ret = _fred_to_log_returns(dxy)
-    vix_lev = _fred_to_levels(vix)
+    # Extract date-value pairs for date-aligned correlation
+    spy_dv = _extract_dates_and_values_price(spy) if spy else []
+    tlt_dv = _extract_dates_and_values_price(tlt) if tlt else []
+    gld_dv = _extract_dates_and_values_price(gld) if gld else []
+    hyg_dv = _extract_dates_and_values_price(hyg) if hyg else []
+    oil_dv = _extract_dates_and_values_fred(oil) if oil else []
+    dxy_dv = _extract_dates_and_values_fred(dxy) if dxy else []
+    vix_dv = _extract_dates_and_values_fred(vix) if vix else []
 
-    # Compute seven pairs
+    # Compute seven pairs with DATE-ALIGNED returns
     oil_equity = None
-    if oil_ret is not None and spy_ret is not None:
-        oil_equity = _compute_pair(
-            "Oil-Equity", "Oil (WTI)", "Equity (SPY)",
-            oil_ret, spy_ret, vix_lev
-        )
+    if oil_dv and spy_dv:
+        ret_a, ret_b, vix_l = _align_and_compute_log_returns(oil_dv, spy_dv, vix_dv or None)
+        if ret_a is not None:
+            oil_equity = _compute_pair(
+                "Oil-Equity", "Oil (WTI)", "Equity (SPY)",
+                ret_a, ret_b, vix_l
+            )
 
     oil_bond = None
-    if oil_ret is not None and tlt_ret is not None:
-        oil_bond = _compute_pair(
-            "Oil-Bond", "Oil (WTI)", "Bonds (TLT)",
-            oil_ret, tlt_ret, vix_lev
-        )
+    if oil_dv and tlt_dv:
+        ret_a, ret_b, vix_l = _align_and_compute_log_returns(oil_dv, tlt_dv, vix_dv or None)
+        if ret_a is not None:
+            oil_bond = _compute_pair(
+                "Oil-Bond", "Oil (WTI)", "Bonds (TLT)",
+                ret_a, ret_b, vix_l
+            )
 
     dollar_equity = None
-    if dxy_ret is not None and spy_ret is not None:
-        dollar_equity = _compute_pair(
-            "Dollar-Equity", "Dollar (DXY)", "Equity (SPY)",
-            dxy_ret, spy_ret, vix_lev
-        )
+    if dxy_dv and spy_dv:
+        ret_a, ret_b, vix_l = _align_and_compute_log_returns(dxy_dv, spy_dv, vix_dv or None)
+        if ret_a is not None:
+            dollar_equity = _compute_pair(
+                "Dollar-Equity", "Dollar (DXY)", "Equity (SPY)",
+                ret_a, ret_b, vix_l
+            )
 
     gold_equity = None
-    if gld_ret is not None and spy_ret is not None:
-        gold_equity = _compute_pair(
-            "Gold-Equity", "Gold (GLD)", "Equity (SPY)",
-            gld_ret, spy_ret, vix_lev
-        )
+    if gld_dv and spy_dv:
+        ret_a, ret_b, vix_l = _align_and_compute_log_returns(gld_dv, spy_dv, vix_dv or None)
+        if ret_a is not None:
+            gold_equity = _compute_pair(
+                "Gold-Equity", "Gold (GLD)", "Equity (SPY)",
+                ret_a, ret_b, vix_l
+            )
 
     gold_bond = None
-    if gld_ret is not None and tlt_ret is not None:
-        gold_bond = _compute_pair(
-            "Gold-Bond", "Gold (GLD)", "Bonds (TLT)",
-            gld_ret, tlt_ret, vix_lev
-        )
+    if gld_dv and tlt_dv:
+        ret_a, ret_b, vix_l = _align_and_compute_log_returns(gld_dv, tlt_dv, vix_dv or None)
+        if ret_a is not None:
+            gold_bond = _compute_pair(
+                "Gold-Bond", "Gold (GLD)", "Bonds (TLT)",
+                ret_a, ret_b, vix_l
+            )
 
     credit_equity = None
-    if hyg_ret is not None and spy_ret is not None:
-        credit_equity = _compute_pair(
-            "Credit-Equity", "Credit (HYG)", "Equity (SPY)",
-            hyg_ret, spy_ret, vix_lev
-        )
+    if hyg_dv and spy_dv:
+        ret_a, ret_b, vix_l = _align_and_compute_log_returns(hyg_dv, spy_dv, vix_dv or None)
+        if ret_a is not None:
+            credit_equity = _compute_pair(
+                "Credit-Equity", "Credit (HYG)", "Equity (SPY)",
+                ret_a, ret_b, vix_l
+            )
 
     dollar_gold = None
-    if dxy_ret is not None and gld_ret is not None:
-        dollar_gold = _compute_pair(
-            "Dollar-Gold", "Dollar (DXY)", "Gold (GLD)",
-            dxy_ret, gld_ret, vix_lev
-        )
+    if dxy_dv and gld_dv:
+        ret_a, ret_b, vix_l = _align_and_compute_log_returns(dxy_dv, gld_dv, vix_dv or None)
+        if ret_a is not None:
+            dollar_gold = _compute_pair(
+                "Dollar-Gold", "Dollar (DXY)", "Gold (GLD)",
+                ret_a, ret_b, vix_l
+            )
 
     # Aggregate statistics
     stress_coupling_count = 0
