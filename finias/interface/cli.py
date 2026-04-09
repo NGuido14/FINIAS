@@ -18,6 +18,7 @@ from finias.data.providers.polygon_client import PolygonClient
 from finias.data.providers.fred_client import FredClient
 from finias.data.cache.market_cache import MarketDataCache
 from finias.agents.macro_strategist.agent import MacroStrategist
+from finias.agents.technical_analyst.agent import TechnicalAnalyst
 from finias.agents.director.agent import Director
 from finias.core.agents.models import AgentQuery
 
@@ -67,6 +68,9 @@ async def initialize_system():
 
     macro = MacroStrategist(cache=cache, state=state)
     registry.register(macro)
+
+    ta = TechnicalAnalyst(cache=cache, state=state)
+    registry.register(ta)
 
     director = Director(registry=registry, state=state, db=db)
 

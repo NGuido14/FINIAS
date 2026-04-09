@@ -95,11 +95,18 @@ class ToolRegistry:
             )
 
         agent = self._agents[tool_name]
+        # Merge any extra tool parameters (e.g., symbols, metrics) into context
+        # so agents can access tool-specific params beyond the standard 3
+        context = tool_input.get("context", {})
+        for key, value in tool_input.items():
+            if key not in ("question", "context", "require_fresh_data"):
+                context[key] = value
+
         query = AgentQuery(
             asking_agent=calling_agent,
             target_agent=agent.name,
             question=tool_input.get("question", ""),
-            context=tool_input.get("context", {}),
+            context=context,
             require_fresh_data=tool_input.get("require_fresh_data", False)
         )
 
