@@ -484,6 +484,111 @@ class Director(BaseAgent):
             logger.warning(f"Failed to load cached macro context: {e}")
             return None
 
+    async def _get_cached_ta_context(self) -> Optional[str]:
+        """
+        Check Redis for fresh TA signals.
+
+        Returns a formatted context string if cache is fresh (< 14 hours),
+        or None if stale/missing. Same guardrail pattern as macro context:
+        every computed value has boundary notes to prevent fabrication.
+        """
+        if self.state is None:
+            return None
+
+        try:
+            raw = await self.state.client.get("ta:current")
+            if not raw:
+                return None
+
+            data = json.loads(raw)
+
+            # Check freshness
+            computed_at = data.get("computed_at")
+            if not computed_at:
+                return None
+
+            updated_time = datetime.fromisoformat(computed_at)
+            age = datetime.now(timezone.utc) - updated_time
+            if age > timedelta(hours=14):
+                return None
+
+            summary = data.get("universe_summary", {})
+            signals = data.get("signals", {})
+
+            parts = []
+            parts.append(f"CACHED TECHNICAL CONTEXT (updated {age.total_seconds()/60:.0f} minutes ago):")
+            parts.append(f"  Analyzed {summary.get('total_analyzed', 0)} symbols")
+            parts.append(f"  Bullish: {summary.get('pct_bullish', 0):.0f}% | "
+                        f"Bearish: {summary.get('pct_bearish', 0):.0f}% | "
+                        f"Neutral: {summary.get('pct_neutral', 0):.0f}%")
+
+            if summary.get("volume_confirming") is not None:
+                parts.append(f"  Volume: {summary.get('volume_confirming', 0)} confirming, "
+                            f"{summary.get('volume_contradicting', 0)} contradicting")
+            if summary.get("rs_improving") is not None:
+                parts.append(f"  Relative Strength: {summary.get('rs_improving', 0)} improving, "
+                            f"{summary.get('rs_deteriorating', 0)} deteriorating")
+
+            # Top signals by combined score
+            scored = []
+            for sym, sig in signals.items():
+                ts = sig.get("trend", {}).get("trend_score", 0)
+                ms = sig.get("momentum", {}).get("momentum_score", 0)
+                scored.append((sym, ts, ms, sig))
+            scored.sort(key=lambda x: x[1] + x[2], reverse=True)
+
+            if scored:
+                parts.append("")
+                parts.append("TOP BULLISH SIGNALS (cite these EXACT values):")
+                for sym, ts, ms, sig in scored[:5]:
+                    regime = sig.get("trend", {}).get("trend_regime", "?")
+                    rsi = sig.get("momentum", {}).get("rsi", {}).get("value")
+                    rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
+                    div = sig.get("momentum", {}).get("divergence", {}).get("type", "none")
+                    vol = sig.get("volume", {}).get("volume_confirmation_score", 0) if "volume" in sig else 0
+                    rs = sig.get("relative_strength", {}).get("rs_regime", "?") if "relative_strength" in sig else "?"
+                    div_str = f" [{div}]" if div != "none" else ""
+                    support = sig.get("levels", {}).get("nearest_support")
+                    resist = sig.get("levels", {}).get("nearest_resistance")
+                    sup_str = f"${support:.2f}" if support else "N/A"
+                    res_str = f"${resist:.2f}" if resist else "N/A"
+                    parts.append(f"  {sym}: {regime} (trend={ts:.2f}, mom={ms:.2f}, "
+                                f"RSI={rsi_str}, vol_conf={vol:.2f}, RS={rs}){div_str} "
+                                f"S:{sup_str}/R:{res_str}")
+
+                parts.append("")
+                parts.append("TOP BEARISH SIGNALS:")
+                for sym, ts, ms, sig in scored[-5:]:
+                    regime = sig.get("trend", {}).get("trend_regime", "?")
+                    rsi = sig.get("momentum", {}).get("rsi", {}).get("value")
+                    rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
+                    div = sig.get("momentum", {}).get("divergence", {}).get("type", "none")
+                    vol = sig.get("volume", {}).get("volume_confirmation_score", 0) if "volume" in sig else 0
+                    rs = sig.get("relative_strength", {}).get("rs_regime", "?") if "relative_strength" in sig else "?"
+                    div_str = f" [{div}]" if div != "none" else ""
+                    parts.append(f"  {sym}: {regime} (trend={ts:.2f}, mom={ms:.2f}, "
+                                f"RSI={rsi_str}, vol_conf={vol:.2f}, RS={rs}){div_str}")
+
+            # Divergences
+            divs = summary.get("divergences", [])
+            if divs:
+                parts.append("")
+                parts.append("ACTIVE DIVERGENCES:")
+                for d in divs[:5]:
+                    parts.append(f"  {d['symbol']}: {d['type']}")
+
+            parts.append("")
+            parts.append("TA DATA BOUNDARY: ONLY cite TA signals listed above.")
+            parts.append("Do NOT invent trend regimes, RSI values, support/resistance,")
+            parts.append("volume scores, or RS metrics for symbols not in cached context.")
+            parts.append("For specific stock analysis, call query_technical_analyst with symbols.")
+
+            return "\n".join(parts)
+
+        except Exception as e:
+            logger.warning(f"Failed to load cached TA context: {e}")
+            return None
+
     async def chat(self, user_message: str) -> str:
         """
         Process a user message and return a response.
@@ -536,6 +641,20 @@ class Director(BaseAgent):
                 "historical question the trajectory doesn't fully answer.\n\n" + cached_context
             )
             logger.info("Using cached macro context (skipping macro agent call)")
+
+        # Check for cached TA context
+        cached_ta = await self._get_cached_ta_context()
+        if cached_ta:
+            dated_system_prompt += (
+                "\n\nYou have access to FRESH cached technical analysis signals below. "
+                "Use this data to answer technical questions directly WITHOUT calling "
+                "the technical analyst tool for symbols already listed. "
+                "For specific stock analysis not in the cache, call query_technical_analyst "
+                "with the symbols parameter.\n"
+                "query_ta_history is FREE and INSTANT — use it for historical signal questions.\n\n"
+                + cached_ta
+            )
+            logger.info("Using cached TA context")
 
         # Initial Claude call
         from finias.core.utils.retry import retry_claude_call

@@ -179,6 +179,36 @@ async def main():
         # Mark data as fresh
         await state.mark_data_fresh("macro_refresh")
 
+        # === TA AGENT REFRESH (pure Python, $0.00) ===
+        logger.info("Running TA agent on full universe...")
+        try:
+            from finias.agents.technical_analyst.agent import TechnicalAnalyst
+            from finias.data.universe import get_active_symbols, TIER_SP500
+
+            ta = TechnicalAnalyst(cache=cache, state=state)
+            all_symbols = await get_active_symbols(db, tier=TIER_SP500)
+
+            ta_query = AgentQuery(
+                asking_agent="morning_refresh",
+                target_agent="technical_analyst",
+                question="Full universe technical refresh",
+                context={"symbols": all_symbols},
+                require_fresh_data=True,
+            )
+            ta_opinion = await ta.query(ta_query)
+            logger.info(f"  TA refresh: analyzed {len(all_symbols)} symbols, "
+                       f"direction={ta_opinion.direction.value}")
+
+            # Verify TA Redis cache
+            ta_cached = await state.client.get("ta:current")
+            if ta_cached:
+                logger.info("  TA Redis cache updated")
+            else:
+                logger.warning("  TA Redis cache NOT updated")
+
+        except Exception as e:
+            logger.warning(f"  TA refresh failed (non-blocking): {e}")
+
         logger.info("Morning refresh complete. Regime cached in Redis.")
         logger.info(f"  Total elapsed: {elapsed:.1f}s")
 

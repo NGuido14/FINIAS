@@ -279,6 +279,25 @@ async def refresh():
         )
         opinion = await macro.query(query)
 
+        # Run TA refresh (pure Python, $0.00, non-blocking)
+        ta_status = "skipped"
+        try:
+            ta = _components.get("registry").get_agent("technical_analyst") if _components.get("registry") else None
+            if ta:
+                from finias.data.universe import get_active_symbols, TIER_SP500
+                all_symbols = await get_active_symbols(db, tier=TIER_SP500)
+                ta_query = AgentQuery(
+                    asking_agent="web_refresh",
+                    target_agent="technical_analyst",
+                    question="Full universe technical refresh",
+                    context={"symbols": all_symbols},
+                    require_fresh_data=True,
+                )
+                ta_opinion = await ta.query(ta_query)
+                ta_status = f"{len(all_symbols)} symbols analyzed"
+        except Exception as e:
+            ta_status = f"error: {e}"
+
         return JSONResponse({
             "status": "complete",
             "direction": opinion.direction.value,
@@ -287,6 +306,7 @@ async def refresh():
             "findings": len(opinion.key_findings),
             "prices": price_status,
             "cot": cot_status,
+            "ta": ta_status,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
     except Exception as e:

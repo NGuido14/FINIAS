@@ -214,10 +214,33 @@ async def main():
                             require_fresh_data=True,
                         )
                         opinion = await macro.timed_query(refresh_query)
-                        print(f"Refresh complete. Regime: {opinion.regime.value if opinion.regime else 'N/A'}, "
+                        print(f"Macro refresh complete. Regime: {opinion.regime.value if opinion.regime else 'N/A'}, "
                               f"Confidence: {opinion.confidence.value}, "
                               f"Findings: {len(opinion.key_findings)}")
-                        print("Cached context now available for fast queries.\n")
+
+                        # Run TA agent on full universe (pure Python, $0.00)
+                        print("Running TA agent on full universe...")
+                        try:
+                            ta = components["registry"].get_agent("technical_analyst")
+                            if ta:
+                                from finias.data.universe import get_active_symbols, TIER_SP500
+                                all_symbols = await get_active_symbols(components["db"], tier=TIER_SP500)
+                                ta_query = AgentQuery(
+                                    asking_agent="cli_refresh",
+                                    target_agent="technical_analyst",
+                                    question="Full universe technical refresh",
+                                    context={"symbols": all_symbols},
+                                    require_fresh_data=True,
+                                )
+                                ta_opinion = await ta.timed_query(ta_query)
+                                print(f"TA refresh complete. Analyzed {len(all_symbols)} symbols. "
+                                      f"Direction: {ta_opinion.direction.value}")
+                            else:
+                                print("TA agent not available.")
+                        except Exception as e:
+                            print(f"TA refresh failed (non-blocking): {e}")
+
+                        print("All cached contexts now available for fast queries.\n")
                     else:
                         print("Macro agent not available.\n")
                 except Exception as e:

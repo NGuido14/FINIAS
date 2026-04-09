@@ -36,6 +36,12 @@ from finias.agents.technical_analyst.tools import get_ta_tool_definition
 from finias.agents.technical_analyst.computations.trend import analyze_trend
 from finias.agents.technical_analyst.computations.momentum import analyze_momentum
 from finias.agents.technical_analyst.computations.levels import analyze_levels
+from finias.agents.technical_analyst.computations.volume import analyze_volume
+from finias.agents.technical_analyst.computations.relative_strength import (
+    analyze_relative_strength,
+    compute_universe_returns,
+    SECTOR_ETF_MAP,
+)
 
 logger = logging.getLogger("finias.agent.technical_analyst")
 
@@ -117,6 +123,14 @@ class TechnicalAnalyst(BaseAgent):
         # Convert to DataFrames
         dfs = self._bars_to_dataframes(bars_by_symbol)
 
+        # Load sector context for relative strength analysis
+        sector_map = await self._load_sector_map()
+        sector_etf_dfs = self._ensure_sector_etfs(dfs, bars_by_symbol)
+        spy_df = dfs.get("SPY")
+
+        # Compute universe 20d returns for RS percentile ranking
+        universe_returns = compute_universe_returns(dfs)
+
         # Run computation for each symbol
         all_signals = {}
         skipped = 0
@@ -127,15 +141,29 @@ class TechnicalAnalyst(BaseAgent):
                 continue
 
             try:
-                # Sequential: trend → momentum (uses trend regime) → levels
+                # Sequential: trend → momentum → levels → volume → relative_strength
                 trend = analyze_trend(df, symbol=symbol)
                 momentum = analyze_momentum(df, symbol=symbol, trend_regime=trend.trend_regime)
                 levels = analyze_levels(df, symbol=symbol)
+                vol = analyze_volume(df, symbol=symbol, trend_regime=trend.trend_regime)
+
+                # Relative strength needs sector ETF and SPY bars
+                sector_name = sector_map.get(symbol, "unknown")
+                sector_etf = SECTOR_ETF_MAP.get(sector_name)
+                sector_etf_df = sector_etf_dfs.get(sector_etf) if sector_etf else None
+
+                rs = analyze_relative_strength(
+                    df, symbol=symbol, sector=sector_name,
+                    sector_etf_df=sector_etf_df, spy_df=spy_df,
+                    universe_returns_20d=universe_returns,
+                )
 
                 all_signals[symbol] = {
                     "trend": trend.to_dict(),
                     "momentum": momentum.to_dict(),
                     "levels": levels.to_dict(),
+                    "volume": vol.to_dict(),
+                    "relative_strength": rs.to_dict(),
                 }
             except Exception as e:
                 logger.warning(f"Computation failed for {symbol}: {e}")
@@ -161,18 +189,47 @@ class TechnicalAnalyst(BaseAgent):
         """Determine which symbols to analyze from the query."""
         # Check for explicit symbols in query context
         symbols = query.context.get("symbols", [])
-        if symbols:
-            return symbols
+        if not symbols:
+            symbols = query.context.get("tool_input", {}).get("symbols", [])
 
-        # Check for symbols in the tool_input (from Director)
-        symbols = query.context.get("tool_input", {}).get("symbols", [])
-        if symbols:
-            return symbols
+        if not symbols:
+            from finias.data.universe import MACRO_ETFS
+            symbols = list(MACRO_ETFS)
 
-        # Default: use macro ETFs + top market cap stocks for fast response
-        # Full universe analysis happens on refresh, not per-query
+        # Always ensure sector ETFs + SPY are loaded for RS computation
         from finias.data.universe import MACRO_ETFS
-        return list(MACRO_ETFS)
+        essential = set(MACRO_ETFS)  # Includes SPY and all sector ETFs
+        combined = list(set(symbols) | essential)
+        return combined
+
+    async def _load_sector_map(self) -> dict[str, str]:
+        """Load GICS sector mapping from symbol_universe table."""
+        try:
+            rows = await self.cache.db.fetch(
+                "SELECT symbol, sector FROM symbol_universe WHERE is_active AND sector IS NOT NULL"
+            )
+            return {r["symbol"]: r["sector"] for r in rows}
+        except Exception:
+            return {}
+
+    def _ensure_sector_etfs(
+        self, dfs: dict[str, pd.DataFrame], bars_by_symbol: dict,
+    ) -> dict[str, pd.DataFrame]:
+        """Ensure all sector ETF DataFrames are available."""
+        etf_dfs = {}
+        for etf in SECTOR_ETF_MAP.values():
+            if etf in dfs:
+                etf_dfs[etf] = dfs[etf]
+            elif etf in bars_by_symbol:
+                # Convert if not already in dfs
+                df = pd.DataFrame(bars_by_symbol[etf])
+                df = df.rename(columns={"trade_date": "date"})
+                for col in ["open", "high", "low", "close", "volume"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                df = df.sort_values("date").reset_index(drop=True)
+                etf_dfs[etf] = df
+        return etf_dfs
 
     def _bars_to_dataframes(self, bars_by_symbol: dict) -> dict[str, pd.DataFrame]:
         """Convert bar dicts to pandas DataFrames suitable for pandas-ta."""
@@ -224,6 +281,25 @@ class TechnicalAnalyst(BaseAgent):
             if div != "none":
                 divergences.append({"symbol": symbol, "type": div})
 
+        # Volume confirmation stats
+        vol_confirming = 0
+        vol_contradicting = 0
+        rs_improving = 0
+        rs_deteriorating = 0
+
+        for symbol, sig in all_signals.items():
+            vc = sig.get("volume", {}).get("volume_confirmation_score", 0)
+            if vc > 0.2:
+                vol_confirming += 1
+            elif vc < -0.2:
+                vol_contradicting += 1
+
+            rs_r = sig.get("relative_strength", {}).get("rs_regime", "neutral")
+            if rs_r in ("leading", "improving"):
+                rs_improving += 1
+            elif rs_r in ("lagging", "deteriorating"):
+                rs_deteriorating += 1
+
         total = bullish_count + bearish_count + neutral_count
         return {
             "total_analyzed": total,
@@ -231,7 +307,11 @@ class TechnicalAnalyst(BaseAgent):
             "pct_bearish": round(bearish_count / total * 100, 1) if total > 0 else 0,
             "pct_neutral": round(neutral_count / total * 100, 1) if total > 0 else 0,
             "trend_distribution": trends,
-            "divergences": divergences[:10],  # Top 10
+            "divergences": divergences[:10],
+            "volume_confirming": vol_confirming,
+            "volume_contradicting": vol_contradicting,
+            "rs_improving": rs_improving,
+            "rs_deteriorating": rs_deteriorating,
         }
 
     async def _cache_results(self, all_signals: dict, summary: dict):
@@ -252,6 +332,8 @@ class TechnicalAnalyst(BaseAgent):
                     "trend": sig["trend"],
                     "momentum": sig["momentum"],
                     "levels": sig["levels"],
+                    "volume": sig.get("volume", {}),
+                    "relative_strength": sig.get("relative_strength", {}),
                 }
 
             await self.state.client.set(
@@ -436,11 +518,8 @@ class TechnicalAnalyst(BaseAgent):
         """
         Build data notes string for Director cached context.
 
-        This follows the macro agent's guardrail pattern: every computed value
-        that Claude might cite must be explicitly surfaced with boundary notes
-        to prevent fabrication.
-
-        Fully implemented in Prompt 4 (Director integration).
+        Every computed value that Claude might cite must be explicitly surfaced
+        with boundary notes to prevent fabrication.
         """
         parts = []
         parts.append("TECHNICAL ANALYSIS (Python-computed — cite EXACT values only):")
@@ -448,8 +527,57 @@ class TechnicalAnalyst(BaseAgent):
         parts.append(f"  Bullish: {summary.get('pct_bullish', 0):.0f}% | "
                      f"Bearish: {summary.get('pct_bearish', 0):.0f}% | "
                      f"Neutral: {summary.get('pct_neutral', 0):.0f}%")
-        parts.append("  TA DATA BOUNDARY: ONLY cite TA signals listed in cached context.")
-        parts.append("  Do NOT invent trend regimes, RSI values, or support/resistance levels.")
+
+        # Top movers by trend score
+        scored = []
+        for sym, sig in all_signals.items():
+            ts = sig.get("trend", {}).get("trend_score", 0)
+            ms = sig.get("momentum", {}).get("momentum_score", 0)
+            vs = sig.get("volume", {}).get("volume_confirmation_score", 0)
+            rs_s = sig.get("relative_strength", {}).get("rs_score", 0)
+            scored.append((sym, ts, ms, vs, rs_s))
+
+        scored.sort(key=lambda x: x[1] + x[2], reverse=True)
+
+        if scored:
+            parts.append("")
+            parts.append("  TOP BULLISH (by trend + momentum):")
+            for sym, ts, ms, vs, rs_s in scored[:5]:
+                sig = all_signals[sym]
+                regime = sig.get("trend", {}).get("trend_regime", "?")
+                rsi = sig.get("momentum", {}).get("rsi", {}).get("value", "?")
+                div = sig.get("momentum", {}).get("divergence", {}).get("type", "none")
+                vol_conf = sig.get("volume", {}).get("volume_confirmation_score", 0)
+                rs_regime = sig.get("relative_strength", {}).get("rs_regime", "?")
+                div_str = f" [{div}]" if div != "none" else ""
+                parts.append(f"    {sym}: {regime} (trend={ts:.2f}, mom={ms:.2f}, "
+                           f"RSI={rsi}, vol_conf={vol_conf:.2f}, RS={rs_regime}){div_str}")
+
+            parts.append("  TOP BEARISH:")
+            for sym, ts, ms, vs, rs_s in scored[-5:]:
+                sig = all_signals[sym]
+                regime = sig.get("trend", {}).get("trend_regime", "?")
+                rsi = sig.get("momentum", {}).get("rsi", {}).get("value", "?")
+                div = sig.get("momentum", {}).get("divergence", {}).get("type", "none")
+                vol_conf = sig.get("volume", {}).get("volume_confirmation_score", 0)
+                rs_regime = sig.get("relative_strength", {}).get("rs_regime", "?")
+                div_str = f" [{div}]" if div != "none" else ""
+                parts.append(f"    {sym}: {regime} (trend={ts:.2f}, mom={ms:.2f}, "
+                           f"RSI={rsi}, vol_conf={vol_conf:.2f}, RS={rs_regime}){div_str}")
+
+        # Active divergences
+        divs = summary.get("divergences", [])
+        if divs:
+            parts.append("")
+            parts.append("  ACTIVE DIVERGENCES:")
+            for d in divs[:10]:
+                parts.append(f"    {d['symbol']}: {d['type']}")
+
+        parts.append("")
+        parts.append("  TA DATA BOUNDARY: ONLY cite TA signals listed above.")
+        parts.append("  Do NOT invent trend regimes, RSI values, support/resistance levels,")
+        parts.append("  volume scores, or relative strength metrics for symbols not listed.")
+
         return "\n".join(parts)
 
     def _empty_opinion(self, reason: str) -> AgentOpinion:
