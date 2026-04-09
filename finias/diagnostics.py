@@ -939,6 +939,93 @@ async def check_data_quality(db: DatabasePool, fred: FredClient):
 
 
 # ============================================================
+# 11. Technical Analyst Agent
+# ============================================================
+
+async def check_ta_agent(db: DatabasePool, state: RedisState):
+    header("11. Technical Analyst Agent")
+
+    # Check technical_signals table
+    try:
+        total = await db.fetchval("SELECT COUNT(*) FROM technical_signals")
+        symbols = await db.fetchval("SELECT COUNT(DISTINCT symbol) FROM technical_signals")
+        latest = await db.fetchval("SELECT MAX(signal_date) FROM technical_signals")
+        with_fwd = await db.fetchval("SELECT COUNT(*) FROM technical_signals WHERE fwd_return_20d IS NOT NULL")
+        ok(f"technical_signals: {total:,} rows, {symbols} symbols, latest={latest}")
+        ok(f"Forward returns computed: {with_fwd:,} of {total:,}")
+    except Exception as e:
+        fail(f"technical_signals: {e}")
+
+    # Check symbol_universe
+    try:
+        universe = await db.fetchval("SELECT COUNT(*) FROM symbol_universe WHERE is_active")
+        sp500 = await db.fetchval("SELECT COUNT(*) FROM symbol_universe WHERE is_active AND tier = 'sp500'")
+        ok(f"symbol_universe: {universe} active ({sp500} S&P 500)")
+    except Exception as e:
+        fail(f"symbol_universe: {e}")
+
+    # Check Redis TA cache
+    try:
+        ta_raw = await state.client.get("ta:current")
+        if ta_raw:
+            import json
+            ta_data = json.loads(ta_raw)
+            computed_at = ta_data.get("computed_at", "unknown")
+            sig_count = len(ta_data.get("signals", {}))
+            summary = ta_data.get("universe_summary", {})
+            ok(f"Redis ta:current: {sig_count} symbols (computed: {computed_at})")
+            info(f"Bullish: {summary.get('pct_bullish', '?')}% | "
+                 f"Bearish: {summary.get('pct_bearish', '?')}% | "
+                 f"Neutral: {summary.get('pct_neutral', '?')}%")
+
+            # Check for synthesis data
+            sample_sig = next(iter(ta_data.get("signals", {}).values()), {})
+            has_vol = "volume" in sample_sig
+            has_rs = "relative_strength" in sample_sig
+            has_volatility = "volatility" in sample_sig
+            has_synth = "synthesis" in sample_sig
+            info(f"Modules: trend ✓ momentum ✓ levels ✓ "
+                 f"volume {'✓' if has_vol else '✗'} "
+                 f"RS {'✓' if has_rs else '✗'} "
+                 f"volatility {'✓' if has_volatility else '✗'} "
+                 f"synthesis {'✓' if has_synth else '✗'}")
+
+            # High conviction signals
+            if has_synth:
+                high_conv = []
+                for sym, sig in ta_data.get("signals", {}).items():
+                    synth = sig.get("synthesis", {})
+                    if synth.get("conviction", {}).get("level") == "high":
+                        high_conv.append(f"{sym} ({synth.get('action', '?')})")
+                if high_conv:
+                    info(f"High conviction: {', '.join(high_conv[:10])}")
+                else:
+                    info("No high-conviction signals in current cache")
+
+            if summary.get("volume_confirming") is not None:
+                info(f"Volume: {summary.get('volume_confirming', 0)} confirming, "
+                     f"{summary.get('volume_contradicting', 0)} contradicting")
+        else:
+            warn("Redis ta:current: NOT SET (run refresh first)")
+    except Exception as e:
+        fail(f"Redis TA cache: {e}")
+
+    # Trend regime distribution from latest signals
+    try:
+        rows = await db.fetch(
+            "SELECT trend_regime, COUNT(*) as n "
+            "FROM technical_signals "
+            "WHERE signal_date = (SELECT MAX(signal_date) FROM technical_signals) "
+            "GROUP BY trend_regime ORDER BY n DESC"
+        )
+        if rows:
+            dist = ", ".join(f"{r['trend_regime']}: {r['n']}" for r in rows)
+            info(f"Latest trend distribution: {dist}")
+    except Exception:
+        pass
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -972,6 +1059,7 @@ async def main():
         await check_interpretation_validation(db)
         await table_usage_summary(db)
         await check_data_quality(db, fred)
+        await check_ta_agent(db, state)
 
         # Cleanup
         await polygon.close()

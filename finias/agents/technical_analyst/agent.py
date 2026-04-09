@@ -42,6 +42,8 @@ from finias.agents.technical_analyst.computations.relative_strength import (
     compute_universe_returns,
     SECTOR_ETF_MAP,
 )
+from finias.agents.technical_analyst.computations.ta_volatility import analyze_volatility as analyze_ta_volatility
+from finias.agents.technical_analyst.computations.signals import synthesize_signals
 
 logger = logging.getLogger("finias.agent.technical_analyst")
 
@@ -158,12 +160,31 @@ class TechnicalAnalyst(BaseAgent):
                     universe_returns_20d=universe_returns,
                 )
 
+                ta_vol = analyze_ta_volatility(df, symbol=symbol)
+
+                # Read macro regime from Redis for signal conditioning
+                current_macro = await self._get_macro_regime()
+
+                # Synthesize all dimensions into actionable signal
+                synthesis = synthesize_signals(
+                    trend=trend.to_dict(),
+                    momentum=momentum.to_dict(),
+                    levels=levels.to_dict(),
+                    volume=vol.to_dict(),
+                    relative_strength=rs.to_dict(),
+                    volatility=ta_vol.to_dict(),
+                    symbol=symbol,
+                    macro_regime=current_macro,
+                )
+
                 all_signals[symbol] = {
                     "trend": trend.to_dict(),
                     "momentum": momentum.to_dict(),
                     "levels": levels.to_dict(),
                     "volume": vol.to_dict(),
                     "relative_strength": rs.to_dict(),
+                    "volatility": ta_vol.to_dict(),
+                    "synthesis": synthesis.to_dict(),
                 }
             except Exception as e:
                 logger.warning(f"Computation failed for {symbol}: {e}")
@@ -250,6 +271,18 @@ class TechnicalAnalyst(BaseAgent):
             dfs[symbol] = df
         return dfs
 
+    async def _get_macro_regime(self) -> str:
+        """Read the current macro regime from Redis for signal conditioning."""
+        if self.state is None:
+            return "unknown"
+        try:
+            regime_data = await self.state.get_regime()
+            if regime_data:
+                return regime_data.get("regime", {}).get("primary", "unknown")
+        except Exception:
+            pass
+        return "unknown"
+
     def _build_summary(self, all_signals: dict) -> dict:
         """Build aggregate summary across all analyzed symbols."""
         trends = {"strong_uptrend": 0, "uptrend": 0, "consolidation": 0,
@@ -300,6 +333,27 @@ class TechnicalAnalyst(BaseAgent):
             elif rs_r in ("lagging", "deteriorating"):
                 rs_deteriorating += 1
 
+        # Synthesis action distribution
+        actions = {"strong_buy": 0, "buy": 0, "hold": 0, "reduce": 0, "sell": 0, "strong_sell": 0}
+        setups = {"mean_reversion_buy": 0, "trend_continuation": 0, "squeeze_breakout": 0,
+                  "distribution_warning": 0, "exhaustion_sell": 0, "none": 0}
+        high_conviction = []
+
+        for symbol, sig in all_signals.items():
+            synth = sig.get("synthesis", {})
+            action = synth.get("action", "hold")
+            setup = synth.get("setup", {}).get("type", "none")
+            actions[action] = actions.get(action, 0) + 1
+            setups[setup] = setups.get(setup, 0) + 1
+
+            if synth.get("conviction", {}).get("level") == "high":
+                high_conviction.append({
+                    "symbol": symbol,
+                    "action": action,
+                    "setup": setup,
+                    "conviction_score": synth.get("conviction", {}).get("score", 0),
+                })
+
         total = bullish_count + bearish_count + neutral_count
         return {
             "total_analyzed": total,
@@ -312,6 +366,9 @@ class TechnicalAnalyst(BaseAgent):
             "volume_contradicting": vol_contradicting,
             "rs_improving": rs_improving,
             "rs_deteriorating": rs_deteriorating,
+            "actions": actions,
+            "setups": setups,
+            "high_conviction": sorted(high_conviction, key=lambda x: x["conviction_score"], reverse=True)[:10],
         }
 
     async def _cache_results(self, all_signals: dict, summary: dict):
@@ -334,6 +391,8 @@ class TechnicalAnalyst(BaseAgent):
                     "levels": sig["levels"],
                     "volume": sig.get("volume", {}),
                     "relative_strength": sig.get("relative_strength", {}),
+                    "volatility": sig.get("volatility", {}),
+                    "synthesis": sig.get("synthesis", {}),
                 }
 
             await self.state.client.set(
@@ -527,45 +586,88 @@ class TechnicalAnalyst(BaseAgent):
         parts.append(f"  Bullish: {summary.get('pct_bullish', 0):.0f}% | "
                      f"Bearish: {summary.get('pct_bearish', 0):.0f}% | "
                      f"Neutral: {summary.get('pct_neutral', 0):.0f}%")
+        parts.append(f"  Volume: {summary.get('volume_confirming', 0)} confirming, "
+                     f"{summary.get('volume_contradicting', 0)} contradicting")
+        parts.append(f"  RS: {summary.get('rs_improving', 0)} improving, "
+                     f"{summary.get('rs_deteriorating', 0)} deteriorating")
 
-        # Top movers by trend score
+        # Synthesis actions
+        actions = summary.get("actions", {})
+        if actions:
+            action_str = ", ".join(f"{k}: {v}" for k, v in actions.items() if v > 0)
+            parts.append(f"  Synthesis: {action_str}")
+
+        # Setups
+        setups = summary.get("setups", {})
+        if setups:
+            setup_str = ", ".join(f"{k}: {v}" for k, v in setups.items() if v > 0)
+            parts.append(f"  Setups: {setup_str}")
+
+        # High conviction
+        high_conv = summary.get("high_conviction", [])
+        if high_conv:
+            parts.append("")
+            parts.append("  HIGH CONVICTION SIGNALS:")
+            for hc in high_conv[:10]:
+                sym = hc.get("symbol", "?")
+                sig = all_signals.get(sym, {})
+                action = hc.get("action", "?")
+                setup = hc.get("setup", "?")
+                conv = hc.get("conviction_score", 0)
+                regime = sig.get("trend", {}).get("trend_regime", "?")
+                rsi = sig.get("momentum", {}).get("rsi", {}).get("value", "?")
+                div = sig.get("momentum", {}).get("divergence", {}).get("type", "none")
+                vol_conf = sig.get("volume", {}).get("volume_confirmation_score", 0)
+                rs_regime = sig.get("relative_strength", {}).get("rs_regime", "?")
+                sq = sig.get("volatility", {}).get("squeeze", {}).get("active", False)
+                div_str = f" [{div}]" if div != "none" else ""
+                sq_str = " [SQUEEZE]" if sq else ""
+                parts.append(f"    {sym}: {action} ({setup}, conv={conv:.2f}) "
+                           f"| {regime} RSI={rsi} vol={vol_conf:.2f} RS={rs_regime}"
+                           f"{div_str}{sq_str}")
+
+        # Top bullish/bearish by combined score
         scored = []
         for sym, sig in all_signals.items():
             ts = sig.get("trend", {}).get("trend_score", 0)
             ms = sig.get("momentum", {}).get("momentum_score", 0)
-            vs = sig.get("volume", {}).get("volume_confirmation_score", 0)
-            rs_s = sig.get("relative_strength", {}).get("rs_score", 0)
-            scored.append((sym, ts, ms, vs, rs_s))
-
+            scored.append((sym, ts, ms))
         scored.sort(key=lambda x: x[1] + x[2], reverse=True)
 
         if scored:
             parts.append("")
-            parts.append("  TOP BULLISH (by trend + momentum):")
-            for sym, ts, ms, vs, rs_s in scored[:5]:
-                sig = all_signals[sym]
+            parts.append("  TOP BULLISH (trend + momentum):")
+            for sym, ts, ms in scored[:5]:
+                sig = all_signals.get(sym, {})
                 regime = sig.get("trend", {}).get("trend_regime", "?")
                 rsi = sig.get("momentum", {}).get("rsi", {}).get("value", "?")
-                div = sig.get("momentum", {}).get("divergence", {}).get("type", "none")
-                vol_conf = sig.get("volume", {}).get("volume_confirmation_score", 0)
-                rs_regime = sig.get("relative_strength", {}).get("rs_regime", "?")
-                div_str = f" [{div}]" if div != "none" else ""
-                parts.append(f"    {sym}: {regime} (trend={ts:.2f}, mom={ms:.2f}, "
-                           f"RSI={rsi}, vol_conf={vol_conf:.2f}, RS={rs_regime}){div_str}")
+                parts.append(f"    {sym}: {regime} (trend={ts:.2f}, mom={ms:.2f}, RSI={rsi})")
 
             parts.append("  TOP BEARISH:")
-            for sym, ts, ms, vs, rs_s in scored[-5:]:
-                sig = all_signals[sym]
+            for sym, ts, ms in scored[-5:]:
+                sig = all_signals.get(sym, {})
                 regime = sig.get("trend", {}).get("trend_regime", "?")
                 rsi = sig.get("momentum", {}).get("rsi", {}).get("value", "?")
-                div = sig.get("momentum", {}).get("divergence", {}).get("type", "none")
-                vol_conf = sig.get("volume", {}).get("volume_confirmation_score", 0)
-                rs_regime = sig.get("relative_strength", {}).get("rs_regime", "?")
-                div_str = f" [{div}]" if div != "none" else ""
-                parts.append(f"    {sym}: {regime} (trend={ts:.2f}, mom={ms:.2f}, "
-                           f"RSI={rsi}, vol_conf={vol_conf:.2f}, RS={rs_regime}){div_str}")
+                parts.append(f"    {sym}: {regime} (trend={ts:.2f}, mom={ms:.2f}, RSI={rsi})")
 
-        # Active divergences
+        # Squeezes
+        squeezes = [(sym, sig.get("volatility", {}).get("squeeze", {}).get("bars", 0))
+                    for sym, sig in all_signals.items()
+                    if sig.get("volatility", {}).get("squeeze", {}).get("active")]
+        if squeezes:
+            squeezes.sort(key=lambda x: x[1], reverse=True)
+            parts.append("")
+            parts.append(f"  ACTIVE SQUEEZES ({len(squeezes)}):")
+            for sym, bars in squeezes[:10]:
+                parts.append(f"    {sym}: {bars} bars")
+
+        # Distribution warnings
+        dist = [sym for sym, sig in all_signals.items()
+                if sig.get("synthesis", {}).get("setup", {}).get("type") == "distribution_warning"]
+        if dist:
+            parts.append(f"  DISTRIBUTION WARNINGS: {', '.join(dist[:15])}")
+
+        # Divergences
         divs = summary.get("divergences", [])
         if divs:
             parts.append("")
@@ -576,7 +678,8 @@ class TechnicalAnalyst(BaseAgent):
         parts.append("")
         parts.append("  TA DATA BOUNDARY: ONLY cite TA signals listed above.")
         parts.append("  Do NOT invent trend regimes, RSI values, support/resistance levels,")
-        parts.append("  volume scores, or relative strength metrics for symbols not listed.")
+        parts.append("  volume scores, squeeze status, synthesis actions, or RS metrics")
+        parts.append("  for symbols not listed.")
 
         return "\n".join(parts)
 

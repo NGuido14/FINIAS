@@ -486,11 +486,11 @@ class Director(BaseAgent):
 
     async def _get_cached_ta_context(self) -> Optional[str]:
         """
-        Check Redis for fresh TA signals.
+        Check Redis for fresh TA signals from the full S&P 500 universe.
 
-        Returns a formatted context string if cache is fresh (< 14 hours),
-        or None if stale/missing. Same guardrail pattern as macro context:
-        every computed value has boundary notes to prevent fabrication.
+        Returns a comprehensive formatted context string including synthesis
+        setups, high-conviction signals, squeeze status, distribution warnings,
+        and universe-level statistics. Same guardrail pattern as macro context.
         """
         if self.state is None:
             return None
@@ -516,12 +516,15 @@ class Director(BaseAgent):
             signals = data.get("signals", {})
 
             parts = []
-            parts.append(f"CACHED TECHNICAL CONTEXT (updated {age.total_seconds()/60:.0f} minutes ago):")
-            parts.append(f"  Analyzed {summary.get('total_analyzed', 0)} symbols")
-            parts.append(f"  Bullish: {summary.get('pct_bullish', 0):.0f}% | "
-                        f"Bearish: {summary.get('pct_bearish', 0):.0f}% | "
-                        f"Neutral: {summary.get('pct_neutral', 0):.0f}%")
+            parts.append(f"CACHED TECHNICAL CONTEXT — FULL S&P 500 UNIVERSE "
+                        f"(updated {age.total_seconds()/60:.0f} minutes ago, "
+                        f"{len(signals)} symbols):")
 
+            # === Universe Summary ===
+            parts.append(f"\nUNIVERSE SUMMARY:")
+            parts.append(f"  Trend: {summary.get('pct_bullish', 0):.0f}% bullish, "
+                        f"{summary.get('pct_bearish', 0):.0f}% bearish, "
+                        f"{summary.get('pct_neutral', 0):.0f}% neutral")
             if summary.get("volume_confirming") is not None:
                 parts.append(f"  Volume: {summary.get('volume_confirming', 0)} confirming, "
                             f"{summary.get('volume_contradicting', 0)} contradicting")
@@ -529,59 +532,166 @@ class Director(BaseAgent):
                 parts.append(f"  Relative Strength: {summary.get('rs_improving', 0)} improving, "
                             f"{summary.get('rs_deteriorating', 0)} deteriorating")
 
-            # Top signals by combined score
-            scored = []
-            for sym, sig in signals.items():
-                ts = sig.get("trend", {}).get("trend_score", 0)
-                ms = sig.get("momentum", {}).get("momentum_score", 0)
-                scored.append((sym, ts, ms, sig))
-            scored.sort(key=lambda x: x[1] + x[2], reverse=True)
+            # === Action Distribution (from synthesis) ===
+            actions = summary.get("actions", {})
+            if actions:
+                action_parts = []
+                for action in ["strong_buy", "buy", "hold", "reduce", "sell", "strong_sell"]:
+                    count = actions.get(action, 0)
+                    if count > 0:
+                        action_parts.append(f"{action}: {count}")
+                if action_parts:
+                    parts.append(f"  Synthesis Actions: {', '.join(action_parts)}")
 
-            if scored:
-                parts.append("")
-                parts.append("TOP BULLISH SIGNALS (cite these EXACT values):")
-                for sym, ts, ms, sig in scored[:5]:
-                    regime = sig.get("trend", {}).get("trend_regime", "?")
-                    rsi = sig.get("momentum", {}).get("rsi", {}).get("value")
+            # === Setup Distribution (from synthesis) ===
+            setups = summary.get("setups", {})
+            if setups:
+                setup_parts = []
+                for setup in ["mean_reversion_buy", "trend_continuation", "squeeze_breakout",
+                              "distribution_warning", "exhaustion_sell"]:
+                    count = setups.get(setup, 0)
+                    if count > 0:
+                        setup_parts.append(f"{setup}: {count}")
+                if setup_parts:
+                    parts.append(f"  Setup Types: {', '.join(setup_parts)}")
+
+            # === High Conviction Signals ===
+            high_conv = summary.get("high_conviction", [])
+            if high_conv:
+                parts.append(f"\nHIGH CONVICTION SIGNALS (cite these EXACT values):")
+                for hc in high_conv[:10]:
+                    sym = hc.get("symbol", "?")
+                    sig = signals.get(sym, {})
+                    synth = sig.get("synthesis", {})
+                    trend_d = sig.get("trend", {})
+                    mom_d = sig.get("momentum", {})
+                    vol_d = sig.get("volume", {})
+                    rs_d = sig.get("relative_strength", {})
+                    lev_d = sig.get("levels", {})
+                    volat_d = sig.get("volatility", {})
+
+                    action = hc.get("action", "?")
+                    setup = hc.get("setup", "?")
+                    conv_score = hc.get("conviction_score", 0)
+                    regime = trend_d.get("trend_regime", "?")
+                    rsi = mom_d.get("rsi", {}).get("value")
                     rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
-                    div = sig.get("momentum", {}).get("divergence", {}).get("type", "none")
-                    vol = sig.get("volume", {}).get("volume_confirmation_score", 0) if "volume" in sig else 0
-                    rs = sig.get("relative_strength", {}).get("rs_regime", "?") if "relative_strength" in sig else "?"
-                    div_str = f" [{div}]" if div != "none" else ""
-                    support = sig.get("levels", {}).get("nearest_support")
-                    resist = sig.get("levels", {}).get("nearest_resistance")
+                    div = mom_d.get("divergence", {}).get("type", "none")
+                    vol_conf = vol_d.get("volume_confirmation_score", 0)
+                    rs_regime = rs_d.get("rs_regime", "?")
+                    support = lev_d.get("nearest_support")
+                    resist = lev_d.get("nearest_resistance")
+                    rr = lev_d.get("risk_reward_ratio")
+                    squeeze = volat_d.get("squeeze", {}).get("active", False)
+                    macro_align = synth.get("macro", {}).get("alignment", "?")
+
                     sup_str = f"${support:.2f}" if support else "N/A"
                     res_str = f"${resist:.2f}" if resist else "N/A"
-                    parts.append(f"  {sym}: {regime} (trend={ts:.2f}, mom={ms:.2f}, "
-                                f"RSI={rsi_str}, vol_conf={vol:.2f}, RS={rs}){div_str} "
-                                f"S:{sup_str}/R:{res_str}")
+                    rr_str = f"{rr:.1f}x" if rr else "N/A"
+                    div_str = f" [{div}]" if div != "none" else ""
+                    sq_str = " [SQUEEZE]" if squeeze else ""
 
-                parts.append("")
-                parts.append("TOP BEARISH SIGNALS:")
-                for sym, ts, ms, sig in scored[-5:]:
+                    parts.append(
+                        f"  {sym}: {action.upper()} (conviction={conv_score:.2f}, "
+                        f"setup={setup}, macro={macro_align})\n"
+                        f"    Trend: {regime} | RSI: {rsi_str}{div_str} | "
+                        f"Vol: {vol_conf:.2f} | RS: {rs_regime}{sq_str}\n"
+                        f"    S:{sup_str} / R:{res_str} / R:R={rr_str}"
+                    )
+
+            # === Squeeze Status ===
+            squeezes = []
+            squeeze_released = []
+            for sym, sig in signals.items():
+                sq = sig.get("volatility", {}).get("squeeze", {})
+                if sq.get("active"):
+                    squeezes.append((sym, sq.get("bars", 0)))
+                if sq.get("just_released"):
+                    squeeze_released.append(sym)
+
+            if squeezes or squeeze_released:
+                parts.append(f"\nSQUEEZE STATUS:")
+                if squeezes:
+                    squeezes.sort(key=lambda x: x[1], reverse=True)
+                    sq_str = ", ".join(f"{s[0]} ({s[1]} bars)" for s in squeezes[:15])
+                    parts.append(f"  Active squeezes ({len(squeezes)}): {sq_str}")
+                if squeeze_released:
+                    parts.append(f"  Just released: {', '.join(squeeze_released[:10])}")
+            else:
+                parts.append(f"\nSQUEEZE STATUS: No active squeezes or recent releases detected")
+
+            # === Distribution Warnings ===
+            dist_warnings = []
+            for sym, sig in signals.items():
+                synth = sig.get("synthesis", {})
+                if synth.get("setup", {}).get("type") == "distribution_warning":
+                    dist_warnings.append(sym)
+
+            if dist_warnings:
+                parts.append(f"\nDISTRIBUTION WARNINGS ({len(dist_warnings)}):")
+                parts.append(f"  {', '.join(dist_warnings[:20])}")
+
+            # === Mean Reversion Setups ===
+            mr_setups = []
+            for sym, sig in signals.items():
+                synth = sig.get("synthesis", {})
+                if synth.get("setup", {}).get("type") == "mean_reversion_buy":
+                    conv = synth.get("conviction", {}).get("score", 0)
+                    mr_setups.append((sym, conv))
+
+            if mr_setups:
+                mr_setups.sort(key=lambda x: x[1], reverse=True)
+                parts.append(f"\nMEAN REVERSION SETUPS ({len(mr_setups)}):")
+                for sym, conv in mr_setups[:10]:
+                    sig = signals.get(sym, {})
                     regime = sig.get("trend", {}).get("trend_regime", "?")
+                    div = sig.get("momentum", {}).get("divergence", {}).get("type", "none")
+                    vol_conf = sig.get("volume", {}).get("volume_confirmation_score", 0)
+                    rs_regime = sig.get("relative_strength", {}).get("rs_regime", "?")
+                    div_str = f" [{div}]" if div != "none" else ""
+                    parts.append(f"  {sym}: {regime} (conv={conv:.2f}, vol={vol_conf:.2f}, "
+                                f"RS={rs_regime}){div_str}")
+
+            # === Top Bullish/Bearish by Synthesis Score ===
+            scored = []
+            for sym, sig in signals.items():
+                synth = sig.get("synthesis", {})
+                bias = synth.get("position_bias", 0)
+                scored.append((sym, bias, sig))
+            scored.sort(key=lambda x: x[1], reverse=True)
+
+            if scored:
+                parts.append(f"\nTOP BULLISH BY SYNTHESIS (position_bias — cite EXACT values):")
+                for sym, bias, sig in scored[:8]:
+                    regime = sig.get("trend", {}).get("trend_regime", "?")
+                    action = sig.get("synthesis", {}).get("action", "?")
                     rsi = sig.get("momentum", {}).get("rsi", {}).get("value")
                     rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
-                    div = sig.get("momentum", {}).get("divergence", {}).get("type", "none")
-                    vol = sig.get("volume", {}).get("volume_confirmation_score", 0) if "volume" in sig else 0
-                    rs = sig.get("relative_strength", {}).get("rs_regime", "?") if "relative_strength" in sig else "?"
-                    div_str = f" [{div}]" if div != "none" else ""
-                    parts.append(f"  {sym}: {regime} (trend={ts:.2f}, mom={ms:.2f}, "
-                                f"RSI={rsi_str}, vol_conf={vol:.2f}, RS={rs}){div_str}")
+                    parts.append(f"  {sym}: bias={bias:+.2f} ({action}, {regime}, RSI={rsi_str})")
+
+                parts.append(f"\nTOP BEARISH BY SYNTHESIS:")
+                for sym, bias, sig in scored[-8:]:
+                    regime = sig.get("trend", {}).get("trend_regime", "?")
+                    action = sig.get("synthesis", {}).get("action", "?")
+                    rsi = sig.get("momentum", {}).get("rsi", {}).get("value")
+                    rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
+                    parts.append(f"  {sym}: bias={bias:+.2f} ({action}, {regime}, RSI={rsi_str})")
 
             # Divergences
             divs = summary.get("divergences", [])
             if divs:
-                parts.append("")
-                parts.append("ACTIVE DIVERGENCES:")
-                for d in divs[:5]:
+                parts.append(f"\nACTIVE DIVERGENCES ({len(divs)}):")
+                for d in divs[:10]:
                     parts.append(f"  {d['symbol']}: {d['type']}")
 
-            parts.append("")
-            parts.append("TA DATA BOUNDARY: ONLY cite TA signals listed above.")
-            parts.append("Do NOT invent trend regimes, RSI values, support/resistance,")
-            parts.append("volume scores, or RS metrics for symbols not in cached context.")
-            parts.append("For specific stock analysis, call query_technical_analyst with symbols.")
+            # === Boundary Notes ===
+            parts.append(f"\nTA DATA BOUNDARY:")
+            parts.append(f"  This data covers {len(signals)} S&P 500 symbols from the last refresh.")
+            parts.append(f"  ONLY cite TA values listed above. Do NOT invent trend regimes, RSI values,")
+            parts.append(f"  support/resistance levels, volume scores, squeeze status, synthesis actions,")
+            parts.append(f"  or relative strength metrics for symbols not listed.")
+            parts.append(f"  For individual stock analysis, call query_technical_analyst with symbols.")
+            parts.append(f"  For historical signal data, call query_ta_history (FREE and INSTANT).")
 
             return "\n".join(parts)
 
@@ -646,12 +756,22 @@ class Director(BaseAgent):
         cached_ta = await self._get_cached_ta_context()
         if cached_ta:
             dated_system_prompt += (
-                "\n\nYou have access to FRESH cached technical analysis signals below. "
-                "Use this data to answer technical questions directly WITHOUT calling "
-                "the technical analyst tool for symbols already listed. "
-                "For specific stock analysis not in the cache, call query_technical_analyst "
+                "\n\nYou have access to FRESH cached technical analysis signals for the "
+                "FULL S&P 500 universe (~500 stocks) below. This includes:\n"
+                "- Universe summary (% bullish/bearish, volume confirmation, RS distribution)\n"
+                "- High conviction signals with synthesis actions (strong_buy → strong_sell)\n"
+                "- Squeeze status (active squeezes and recent releases)\n"
+                "- Distribution warnings (stocks showing internal weakness)\n"
+                "- Mean reversion setups (oversold + divergence + volume exhaustion)\n"
+                "- Top bullish/bearish by synthesis position bias\n\n"
+                "TA TOOL ROUTING GUIDANCE:\n"
+                "- For universe-wide questions ('any squeezes?', 'highest conviction?', "
+                "'which stocks show divergences?'): USE THE CACHED CONTEXT BELOW. "
+                "The data covers 500+ stocks — do NOT call the TA tool.\n"
+                "- For specific stock analysis not in the cache: call query_technical_analyst "
                 "with the symbols parameter.\n"
-                "query_ta_history is FREE and INSTANT — use it for historical signal questions.\n\n"
+                "- For historical signal data: call query_ta_history (FREE and INSTANT).\n"
+                "- For fresh re-computation: call query_technical_analyst with require_fresh_data=True.\n\n"
                 + cached_ta
             )
             logger.info("Using cached TA context")
