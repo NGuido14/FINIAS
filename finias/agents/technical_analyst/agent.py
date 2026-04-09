@@ -339,7 +339,7 @@ class TechnicalAnalyst(BaseAgent):
                     mom.get("divergence", {}).get("type"),
                     levels.get("nearest_support"),
                     levels.get("nearest_resistance"),
-                    levels.get("risk_reward_ratio"),
+                    min(levels.get("risk_reward_ratio") or 0, 999.99),
                     json.dumps(full_json, default=str),
                     current_macro_regime,
                 )

@@ -500,10 +500,13 @@ class Director(BaseAgent):
         # Get tool definitions from registry
         tools = self.registry.get_tool_definitions()
 
-        # Add the history tool (lightweight, not a registered agent)
+        # Add history tools (lightweight, not registered agents — just DB queries)
         if self._db:
             from finias.agents.macro_strategist.history import get_macro_history_tool_definition
             tools.append(get_macro_history_tool_definition())
+
+            from finias.agents.technical_analyst.history import get_ta_history_tool_definition
+            tools.append(get_ta_history_tool_definition())
 
         # Add web search — lets the Director research events, policy, context
         tools.append({
@@ -560,10 +563,13 @@ class Director(BaseAgent):
                         continue
                     logger.info(f"Director calling tool: {block.name}")
                     try:
-                        # Handle history tool directly (no agent, just DB query)
+                        # Handle history tools directly (no agent, just DB queries)
                         if block.name == "query_macro_history" and self._db:
                             from finias.agents.macro_strategist.history import query_history
                             result_text = await query_history(self._db, block.input)
+                        elif block.name == "query_ta_history" and self._db:
+                            from finias.agents.technical_analyst.history import query_ta_history
+                            result_text = await query_ta_history(self._db, block.input)
                         else:
                             opinion = await self.registry.handle_tool_call(
                                 tool_name=block.name,
