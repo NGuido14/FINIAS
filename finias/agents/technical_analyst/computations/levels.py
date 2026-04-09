@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 import pandas as pd
-import finias.agents.technical_analyst.computations.indicators as ta
+import pandas_ta as ta
 
 
 @dataclass

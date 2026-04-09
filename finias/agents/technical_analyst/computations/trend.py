@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 import pandas as pd
-import finias.agents.technical_analyst.computations.indicators as ta
+import pandas_ta as ta
 
 
 @dataclass
@@ -260,9 +260,12 @@ def _compute_ichimoku(df: pd.DataFrame, result: TrendAnalysis, price: float):
             elif c.startswith("IKS_"):
                 kijun = float(ichi_df[c].iloc[-1]) if not pd.isna(ichi_df[c].iloc[-1]) else None
             elif c.startswith("ISA_"):
-                span_a = float(ichi_df[c].iloc[-1]) if not pd.isna(ichi_df[c].iloc[-1]) else None
+                # Spans are shifted forward — use last non-NaN value (current visible cloud)
+                valid = ichi_df[c].dropna()
+                span_a = float(valid.iloc[-1]) if not valid.empty else None
             elif c.startswith("ISB_"):
-                span_b = float(ichi_df[c].iloc[-1]) if not pd.isna(ichi_df[c].iloc[-1]) else None
+                valid = ichi_df[c].dropna()
+                span_b = float(valid.iloc[-1]) if not valid.empty else None
 
         # Cloud color
         if span_a is not None and span_b is not None:

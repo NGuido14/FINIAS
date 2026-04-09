@@ -16,6 +16,7 @@ pydantic-settings>=2.1.0
 # Computation
 numpy>=1.26.0
 pandas>=2.1.0
+pandas-ta>=0.3.14b
 lxml>=5.0.0
 
 # Utilities

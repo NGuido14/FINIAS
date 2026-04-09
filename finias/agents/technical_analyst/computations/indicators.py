@@ -182,15 +182,17 @@ def ichimoku(high: pd.Series, low: pd.Series, close: pd.Series,
     ichimoku_df = pd.DataFrame({
         f"ITS_{tenkan}": its,
         f"IKS_{kijun}": iks,
-        f"ISA_{tenkan}": isa,
-        f"ISB_{kijun}": isb,
+        f"ISA_{tenkan}": isa.shift(kijun),   # Shifted forward to match chart cloud position
+        f"ISB_{kijun}": isb.shift(kijun),    # Shifted forward to match chart cloud position
         f"ICS_{kijun}": ics,
     })
 
-    # Forward-projected spans (shifted forward by kijun periods)
+    # Forward-projected spans beyond current data (for future cloud visualization)
+    # These extend kijun periods past the last bar
+    future_index = pd.RangeIndex(start=len(high), stop=len(high) + kijun)
     span_df = pd.DataFrame({
-        f"ISA_{tenkan}": isa.shift(kijun),
-        f"ISB_{kijun}": isb.shift(kijun),
-    })
+        f"ISA_{tenkan}": pd.concat([isa.iloc[-kijun:].reset_index(drop=True)], ignore_index=True),
+        f"ISB_{kijun}": pd.concat([isb.iloc[-kijun:].reset_index(drop=True)], ignore_index=True),
+    }, index=future_index)
 
     return (ichimoku_df, span_df)
