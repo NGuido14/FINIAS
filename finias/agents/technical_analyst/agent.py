@@ -376,6 +376,16 @@ class TechnicalAnalyst(BaseAgent):
         if self.state is None:
             return
 
+        # Only update the full-universe cache during refresh (100+ symbols).
+        # Per-query calls (19-21 symbols from default ETFs or specific stocks)
+        # must NOT overwrite the cached full-universe scan.
+        if len(all_signals) < 100:
+            logger.debug(
+                f"Skipping ta:current cache update — per-query result "
+                f"({len(all_signals)} symbols, need 100+ for cache update)"
+            )
+            return
+
         try:
             # Build Redis payload (strip dataclass objects, keep dicts only)
             cache_data = {

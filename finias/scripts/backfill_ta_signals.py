@@ -1,17 +1,18 @@
 """
-FINIAS TA Signal Backfill
+FINIAS TA Signal Backfill — Full 7-Module Daily
 
-Walks through 2+ years of historical dates at weekly intervals, computes
-TA signals for all symbols AS OF each date (no look-ahead), and stores
-in technical_signals. Then computes forward returns from actual future prices.
+Walks through historical dates at daily intervals, computes ALL 7 TA
+modules for all symbols AS OF each date (no look-ahead), stores in
+technical_signals with full JSONB, then computes forward returns.
 
 Usage:
-    python -m finias.scripts.backfill_ta_signals                    # Full backfill
-    python -m finias.scripts.backfill_ta_signals --weeks 52         # Last year only
-    python -m finias.scripts.backfill_ta_signals --symbols SPY AAPL # Specific symbols
-    python -m finias.scripts.backfill_ta_signals --report           # Accuracy report only
+    python -m finias.scripts.backfill_ta_signals                     # Full daily backfill
+    python -m finias.scripts.backfill_ta_signals --weeks 52          # Last year only
+    python -m finias.scripts.backfill_ta_signals --step 5            # Every 5 days (faster test)
+    python -m finias.scripts.backfill_ta_signals --symbols SPY AAPL  # Specific symbols
+    python -m finias.scripts.backfill_ta_signals --report            # Validation report only
 
-Performance: ~15-30 minutes for 120 weeks × 500 symbols.
+Performance: ~4-8 hours for full daily backfill (1000 days × 500 symbols × 7 modules).
 Cost: $0.00 (pure Python, no API calls).
 """
 
@@ -20,6 +21,7 @@ import asyncio
 import logging
 import sys
 import json
+import time
 from datetime import date, timedelta
 from typing import Optional
 
@@ -35,30 +37,39 @@ logger = logging.getLogger("finias.scripts.backfill_ta")
 from finias.agents.technical_analyst.computations.trend import analyze_trend
 from finias.agents.technical_analyst.computations.momentum import analyze_momentum
 from finias.agents.technical_analyst.computations.levels import analyze_levels
+from finias.agents.technical_analyst.computations.volume import analyze_volume
+from finias.agents.technical_analyst.computations.relative_strength import (
+    analyze_relative_strength,
+    compute_universe_returns,
+    SECTOR_ETF_MAP,
+)
+from finias.agents.technical_analyst.computations.ta_volatility import (
+    analyze_volatility as analyze_ta_volatility,
+)
+from finias.agents.technical_analyst.computations.signals import synthesize_signals
 
-DEFAULT_WEEKS = 120  # ~2.3 years
-STEP_DAYS = 7  # Weekly intervals
+DEFAULT_WEEKS = 208  # ~4 years (full history)
+STEP_DAYS = 1  # Daily
 MIN_BARS = 200  # Need 200 bars for 200-day MA
-LOOKBACK_BARS = 504  # ~2 years of trading days to load per computation
+LOOKBACK_BARS = 504  # ~2 years of trading days per computation
 
+
+# ====================================================================
+# MAIN BACKFILL
+# ====================================================================
 
 async def backfill_signals(
     db: DatabasePool,
     weeks: int = DEFAULT_WEEKS,
+    step_days: int = STEP_DAYS,
     symbols: list[str] = None,
-    skip_existing: bool = True,
+    skip_existing: bool = False,
 ) -> dict:
     """
-    Walk through historical dates and compute TA signals.
+    Walk through historical dates and compute ALL 7 TA modules.
 
-    Args:
-        db: Database pool.
-        weeks: How many weeks back to compute.
-        symbols: Specific symbols (default: all active in universe).
-        skip_existing: Skip dates that already have signals.
-
-    Returns:
-        Summary dict.
+    Note: skip_existing is False by default because we want to UPGRADE
+    existing 3-module weekly signals with full 7-module data.
     """
     # Get symbol list
     if symbols is None:
@@ -67,97 +78,185 @@ async def backfill_signals(
         )
         symbols = [r["symbol"] for r in rows]
         if not symbols:
-            # Fallback to whatever is in market_data_daily
             rows = await db.fetch("SELECT DISTINCT symbol FROM market_data_daily ORDER BY symbol")
             symbols = [r["symbol"] for r in rows]
 
-    print(f"  → Backfilling {weeks} weeks for {len(symbols)} symbols...")
+    print(f"  → Backfilling {weeks} weeks (step={step_days}d) for {len(symbols)} symbols...")
 
     # Determine date range
-    end_date = date.today() - timedelta(days=1)  # Yesterday (ensure bars exist)
+    end_date = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(weeks=weeks)
 
-    # Load ALL price data once (much faster than per-date queries)
+    # Load ALL price data once
     print(f"  → Loading price data...")
-    data_start = start_date - timedelta(days=LOOKBACK_BARS * 2)  # Extra for MA computation
+    data_start = start_date - timedelta(days=LOOKBACK_BARS * 2)
     all_bars = await _load_all_bars(db, symbols, data_start, end_date)
-    print(f"    Loaded {sum(len(v) for v in all_bars.values())} bars for {len(all_bars)} symbols")
+    total_bars = sum(len(v) for v in all_bars.values())
+    print(f"    Loaded {total_bars:,} bars for {len(all_bars)} symbols")
 
-    # Get existing signal dates to skip
+    # Load sector mapping
+    sector_map = await _load_sector_map(db)
+    print(f"    Loaded sector mapping for {len(sector_map)} symbols")
+
+    # Get trading dates from SPY (ensures we only compute on actual trading days)
+    trading_dates = _get_trading_dates(all_bars, start_date, end_date, step_days)
+    print(f"    {len(trading_dates)} computation dates ({start_date} → {end_date})")
+
+    # Get existing signal dates to potentially skip
     existing = set()
     if skip_existing:
-        rows = await db.fetch(
-            "SELECT DISTINCT signal_date FROM technical_signals"
-        )
+        rows = await db.fetch("SELECT DISTINCT signal_date FROM technical_signals")
         existing = {r["signal_date"] for r in rows}
         if existing:
             print(f"    Skipping {len(existing)} dates with existing signals")
 
     # Walk through dates
-    current = start_date
     total_dates = 0
     total_signals = 0
-    skipped_dates = 0
+    skipped = 0
+    start_time = time.time()
 
-    while current <= end_date:
-        if current in existing:
-            skipped_dates += 1
-            current += timedelta(days=STEP_DAYS)
+    for i, current_date in enumerate(trading_dates):
+        if current_date in existing:
+            skipped += 1
             continue
 
-        # Compute signals for this date
-        date_signals = _compute_signals_as_of(all_bars, symbols, current)
+        # Compute signals for this date (all 7 modules)
+        date_signals = _compute_all_modules(
+            all_bars, symbols, current_date, sector_map,
+        )
 
         if date_signals:
-            await _persist_batch(db, date_signals, current)
+            await _persist_batch(db, date_signals, current_date)
             total_signals += len(date_signals)
 
         total_dates += 1
-        if total_dates % 10 == 0:
-            print(f"    [{total_dates} dates] {total_signals} signals computed...")
 
-        current += timedelta(days=STEP_DAYS)
+        # Progress reporting
+        if total_dates % 50 == 0:
+            elapsed = time.time() - start_time
+            rate = total_dates / elapsed if elapsed > 0 else 0
+            remaining = (len(trading_dates) - i) / rate / 60 if rate > 0 else 0
+            print(f"    [{total_dates}/{len(trading_dates)} dates] "
+                  f"{total_signals:,} signals | "
+                  f"{rate:.1f} dates/sec | "
+                  f"~{remaining:.0f} min remaining")
 
-    print(f"  → Backfill complete: {total_dates} dates, {total_signals} signals")
+    elapsed = time.time() - start_time
+    print(f"  → Backfill complete: {total_dates} dates, {total_signals:,} signals "
+          f"in {elapsed/60:.1f} minutes")
+
     return {
         "dates_computed": total_dates,
-        "dates_skipped": skipped_dates,
+        "dates_skipped": skipped,
         "signals_stored": total_signals,
         "symbols": len(symbols),
     }
 
 
-def _compute_signals_as_of(
+def _get_trading_dates(
+    all_bars: dict, start_date: date, end_date: date, step_days: int,
+) -> list[date]:
+    """Get actual trading dates from SPY bars (no weekends/holidays)."""
+    spy_df = all_bars.get("SPY")
+    if spy_df is None:
+        # Fallback: use any available symbol
+        spy_df = next(iter(all_bars.values()))
+
+    all_dates = sorted(spy_df["trade_date"].unique())
+    filtered = [d for d in all_dates
+                if isinstance(d, date) and start_date <= d <= end_date]
+
+    # Apply step (every Nth trading day)
+    if step_days > 1:
+        filtered = filtered[::step_days]
+
+    return filtered
+
+
+def _compute_all_modules(
     all_bars: dict[str, pd.DataFrame],
     symbols: list[str],
     as_of_date: date,
+    sector_map: dict[str, str],
 ) -> list[dict]:
     """
-    Compute TA signals for all symbols using only data available as of as_of_date.
-    No look-ahead bias — future bars are excluded.
+    Compute ALL 7 TA modules for all symbols as of a given date.
+    No look-ahead bias — only data on or before as_of_date.
     """
     results = []
 
+    # Step 1: Prepare DataFrames sliced to as_of_date
+    dfs = {}
     for symbol in symbols:
         if symbol not in all_bars:
             continue
-
         full_df = all_bars[symbol]
-
-        # Filter to only bars on or before as_of_date (NO LOOK-AHEAD)
         df = full_df[full_df["trade_date"] <= as_of_date].copy()
-
         if len(df) < MIN_BARS:
             continue
+        dfs[symbol] = df.tail(LOOKBACK_BARS).reset_index(drop=True)
 
-        # Take last LOOKBACK_BARS for computation
-        df = df.tail(LOOKBACK_BARS).reset_index(drop=True)
+    if not dfs:
+        return results
 
+    # Step 2: Compute universe 20d returns (needed for RS percentile)
+    universe_returns = compute_universe_returns(dfs)
+
+    # Step 3: Compute macro regime proxy (SPY trailing 60d)
+    macro_regime = _compute_macro_proxy(dfs.get("SPY"))
+
+    # Step 4: Prepare sector ETF DataFrames
+    sector_etf_dfs = {}
+    for etf in SECTOR_ETF_MAP.values():
+        if etf in dfs:
+            sector_etf_dfs[etf] = dfs[etf]
+    spy_df = dfs.get("SPY")
+
+    # Step 5: Run all 7 modules for each symbol
+    for symbol, df in dfs.items():
         try:
-            # Same sequential pipeline as live agent
+            # Module 1: Trend
             trend = analyze_trend(df, symbol=symbol)
-            momentum = analyze_momentum(df, symbol=symbol, trend_regime=trend.trend_regime)
+
+            # Module 2: Momentum (uses trend regime)
+            momentum = analyze_momentum(
+                df, symbol=symbol, trend_regime=trend.trend_regime,
+            )
+
+            # Module 3: Levels
             levels = analyze_levels(df, symbol=symbol)
+
+            # Module 4: Volume (uses trend regime)
+            vol = analyze_volume(
+                df, symbol=symbol, trend_regime=trend.trend_regime,
+            )
+
+            # Module 5: Relative Strength (needs sector context)
+            sector_name = sector_map.get(symbol, "unknown")
+            sector_etf = SECTOR_ETF_MAP.get(sector_name)
+            sector_etf_df = sector_etf_dfs.get(sector_etf) if sector_etf else None
+
+            rs = analyze_relative_strength(
+                df, symbol=symbol, sector=sector_name,
+                sector_etf_df=sector_etf_df, spy_df=spy_df,
+                universe_returns_20d=universe_returns,
+            )
+
+            # Module 6: Volatility
+            ta_vol = analyze_ta_volatility(df, symbol=symbol)
+
+            # Module 7: Synthesis (needs macro regime)
+            synthesis = synthesize_signals(
+                trend=trend.to_dict(),
+                momentum=momentum.to_dict(),
+                levels=levels.to_dict(),
+                volume=vol.to_dict(),
+                relative_strength=rs.to_dict(),
+                volatility=ta_vol.to_dict(),
+                symbol=symbol,
+                macro_regime=macro_regime,
+            )
 
             close_price = float(df["close"].iloc[-1])
 
@@ -167,21 +266,120 @@ def _compute_signals_as_of(
                 "trend": trend.to_dict(),
                 "momentum": momentum.to_dict(),
                 "levels": levels.to_dict(),
+                "volume": vol.to_dict(),
+                "relative_strength": rs.to_dict(),
+                "volatility": ta_vol.to_dict(),
+                "synthesis": synthesis.to_dict(),
             })
+
         except Exception as e:
             logger.debug(f"Computation failed for {symbol} on {as_of_date}: {e}")
 
     return results
 
 
+def _compute_macro_proxy(spy_df: pd.DataFrame) -> str:
+    """Compute macro regime proxy from SPY trailing 60d return."""
+    if spy_df is None or len(spy_df) < 61:
+        return "unknown"
+
+    current = float(spy_df["close"].iloc[-1])
+    past = float(spy_df["close"].iloc[-61])
+    ret = current / past - 1
+
+    if ret < -0.10:
+        return "crisis"
+    elif ret < -0.03:
+        return "risk_off"
+    elif ret > 0.10:
+        return "risk_on"
+    elif ret > 0.03:
+        return "moderate_bull"
+    else:
+        return "transition"
+
+
+# ====================================================================
+# DATA LOADING
+# ====================================================================
+
+async def _load_all_bars(
+    db: DatabasePool, symbols: list[str], from_date: date, to_date: date,
+) -> dict[str, pd.DataFrame]:
+    """Load all OHLCV bars into memory as DataFrames."""
+    rows = await db.fetch(
+        """
+        SELECT symbol, trade_date, open, high, low, close, volume
+        FROM market_data_daily
+        WHERE symbol = ANY($1) AND trade_date BETWEEN $2 AND $3
+        ORDER BY symbol, trade_date ASC
+        """,
+        symbols, from_date, to_date,
+    )
+
+    bars_by_symbol: dict[str, list] = {}
+    for row in rows:
+        sym = row["symbol"]
+        if sym not in bars_by_symbol:
+            bars_by_symbol[sym] = []
+        bars_by_symbol[sym].append(dict(row))
+
+    result = {}
+    for sym, bars in bars_by_symbol.items():
+        df = pd.DataFrame(bars)
+        for col in ["open", "high", "low", "close"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype(int)
+        result[sym] = df
+
+    return result
+
+
+async def _load_sector_map(db: DatabasePool) -> dict[str, str]:
+    """Load GICS sector mapping from symbol_universe."""
+    try:
+        rows = await db.fetch(
+            "SELECT symbol, sector FROM symbol_universe WHERE is_active AND sector IS NOT NULL"
+        )
+        return {r["symbol"]: r["sector"] for r in rows}
+    except Exception:
+        return {}
+
+
+# ====================================================================
+# PERSISTENCE
+# ====================================================================
+
+def _fmt(val, decimals=2):
+    """Safe formatter for values that might be None."""
+    if val is None:
+        return None
+    try:
+        return round(float(val), decimals)
+    except (TypeError, ValueError):
+        return None
+
+
 async def _persist_batch(db: DatabasePool, signals: list[dict], signal_date: date):
-    """Persist a batch of signals for a single date."""
+    """Persist a batch of signals with full 7-module JSONB."""
     for sig in signals:
         trend = sig["trend"]
         mom = sig["momentum"]
         levels = sig["levels"]
 
-        full_json = json.dumps({"trend": trend, "momentum": mom, "levels": levels}, default=str)
+        # Full 7-module JSON for JSONB column
+        full_json = json.dumps({
+            "trend": trend,
+            "momentum": mom,
+            "levels": levels,
+            "volume": sig.get("volume", {}),
+            "relative_strength": sig.get("relative_strength", {}),
+            "volatility": sig.get("volatility", {}),
+            "synthesis": sig.get("synthesis", {}),
+        }, default=str)
+
+        # Compute macro regime from synthesis output
+        macro_regime = sig.get("synthesis", {}).get("macro", {}).get("regime", None)
 
         await db.execute(
             """
@@ -190,9 +388,9 @@ async def _persist_batch(db: DatabasePool, signals: list[dict], signal_date: dat
                 trend_regime, trend_score, adx, ma_alignment, ichimoku_signal, trend_maturity,
                 momentum_score, rsi_14, rsi_zone, macd_direction, macd_cross, divergence_type,
                 nearest_support, nearest_resistance, risk_reward_ratio,
-                full_signals_json
+                full_signals_json, macro_regime
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
             )
             ON CONFLICT (symbol, signal_date) DO UPDATE SET
                 close_price = EXCLUDED.close_price,
@@ -211,356 +409,454 @@ async def _persist_batch(db: DatabasePool, signals: list[dict], signal_date: dat
                 nearest_support = EXCLUDED.nearest_support,
                 nearest_resistance = EXCLUDED.nearest_resistance,
                 risk_reward_ratio = EXCLUDED.risk_reward_ratio,
-                full_signals_json = EXCLUDED.full_signals_json
+                full_signals_json = EXCLUDED.full_signals_json,
+                macro_regime = EXCLUDED.macro_regime
             """,
             sig["symbol"], signal_date, sig["close_price"],
             trend.get("trend_regime"),
-            trend.get("trend_score"),
-            trend.get("adx", {}).get("value"),
+            _fmt(trend.get("trend_score"), 4),
+            _fmt(trend.get("adx", {}).get("value")),
             trend.get("ma", {}).get("alignment"),
             trend.get("ichimoku", {}).get("signal"),
             trend.get("maturity", {}).get("stage"),
-            mom.get("momentum_score"),
-            mom.get("rsi", {}).get("value"),
+            _fmt(mom.get("momentum_score"), 4),
+            _fmt(mom.get("rsi", {}).get("value")),
             mom.get("rsi", {}).get("zone"),
             mom.get("macd", {}).get("direction"),
             mom.get("macd", {}).get("cross"),
             mom.get("divergence", {}).get("type"),
-            levels.get("nearest_support"),
-            levels.get("nearest_resistance"),
-            min(levels.get("risk_reward_ratio") or 0, 999.99),
+            _fmt(levels.get("nearest_support"), 4),
+            _fmt(levels.get("nearest_resistance"), 4),
+            min(_fmt(levels.get("risk_reward_ratio")) or 0, 999.99),
             full_json,
+            macro_regime,
         )
 
+
+# ====================================================================
+# FORWARD RETURNS
+# ====================================================================
 
 async def compute_forward_returns(db: DatabasePool) -> dict:
     """
-    Fill in forward returns for all historical signals using actual future prices.
-
-    For each signal at date D with close price P:
-      fwd_return_5d = close(D+5) / P - 1
-      fwd_return_20d = close(D+20) / P - 1
-      fwd_return_60d = close(D+60) / P - 1
-      fwd_max_drawdown_20d = min(low(D+1..D+20)) / P - 1
+    Fill in forward returns for all signals from actual future prices.
+    Handles 1d, 5d, 20d, 60d returns and 20d max drawdown.
     """
-    print("  → Computing forward returns...")
+    updated = 0
 
-    # Get all signals that need forward returns
-    signals = await db.fetch(
+    # Get symbols with missing forward returns, process one at a time to avoid timeout
+    symbol_rows = await db.fetch(
         """
-        SELECT id, symbol, signal_date, close_price
-        FROM technical_signals
-        WHERE close_price IS NOT NULL AND fwd_return_5d IS NULL
-        ORDER BY signal_date ASC
+        SELECT DISTINCT symbol FROM technical_signals
+        WHERE close_price IS NOT NULL
+          AND (fwd_return_1d IS NULL OR fwd_return_5d IS NULL
+               OR fwd_return_20d IS NULL OR fwd_return_60d IS NULL)
         """
     )
 
-    if not signals:
-        print("    No signals need forward returns (all computed or no signals)")
+    if not symbol_rows:
+        print("  → All forward returns already computed")
         return {"updated": 0}
 
-    print(f"    {len(signals)} signals need forward returns")
+    symbols_to_process = [r["symbol"] for r in symbol_rows]
+    print(f"  → Computing forward returns for {len(symbols_to_process)} symbols...")
 
-    updated = 0
-    for i, sig in enumerate(signals):
-        symbol = sig["symbol"]
-        sig_date = sig["signal_date"]
-        sig_price = float(sig["close_price"])
+    # Fetch per-symbol to avoid timeout on large queries
+    by_symbol: dict[str, list] = {}
+    for sym in symbols_to_process:
+        batch = await db.fetch(
+            """
+            SELECT id, symbol, signal_date, close_price
+            FROM technical_signals
+            WHERE symbol = $1
+              AND close_price IS NOT NULL
+              AND (fwd_return_1d IS NULL OR fwd_return_5d IS NULL
+                   OR fwd_return_20d IS NULL OR fwd_return_60d IS NULL)
+            ORDER BY signal_date ASC
+            """,
+            sym,
+        )
+        if batch:
+            by_symbol[sym] = [dict(r) for r in batch]
 
-        if sig_price <= 0:
+    for sym, sigs in by_symbol.items():
+        # Get all prices for this symbol
+        prices = await db.fetch(
+            """
+            SELECT trade_date, close FROM market_data_daily
+            WHERE symbol = $1 ORDER BY trade_date ASC
+            """,
+            sym,
+        )
+        if not prices:
             continue
 
-        # Get future prices for this symbol
-        future_bars = await db.fetch(
-            """
-            SELECT trade_date, close, low
-            FROM market_data_daily
-            WHERE symbol = $1 AND trade_date > $2
-            ORDER BY trade_date ASC
-            LIMIT 65
-            """,
-            symbol, sig_date,
-        )
+        price_map = {r["trade_date"]: float(r["close"]) for r in prices}
+        dates_sorted = sorted(price_map.keys())
 
-        if not future_bars:
-            continue
+        for sig in sigs:
+            entry_price = float(sig["close_price"])
+            sig_date = sig["signal_date"]
 
-        # Compute returns
-        fwd_5d = None
-        fwd_20d = None
-        fwd_60d = None
-        max_dd_20d = None
+            # Find index of signal date
+            try:
+                idx = dates_sorted.index(sig_date)
+            except ValueError:
+                continue
 
-        closes = [(r["trade_date"], float(r["close"])) for r in future_bars]
-        lows = [float(r["low"]) for r in future_bars[:20]]
+            fwd_1d = fwd_5d = fwd_20d = fwd_60d = dd_20d = None
 
-        if len(closes) >= 5:
-            fwd_5d = closes[4][1] / sig_price - 1
-        if len(closes) >= 20:
-            fwd_20d = closes[19][1] / sig_price - 1
-        if len(closes) >= 60:
-            fwd_60d = closes[59][1] / sig_price - 1
-        if lows:
-            min_low = min(lows)
-            max_dd_20d = min_low / sig_price - 1
+            # 1-day return
+            if idx + 1 < len(dates_sorted):
+                fwd_1d = price_map[dates_sorted[idx + 1]] / entry_price - 1
 
-        # Update the signal row
-        await db.execute(
-            """
-            UPDATE technical_signals
-            SET fwd_return_5d = $1, fwd_return_20d = $2, fwd_return_60d = $3,
-                fwd_max_drawdown_20d = $4
-            WHERE id = $5
-            """,
-            fwd_5d, fwd_20d, fwd_60d, max_dd_20d, sig["id"],
-        )
-        updated += 1
+            # 5-day return
+            if idx + 5 < len(dates_sorted):
+                fwd_5d = price_map[dates_sorted[idx + 5]] / entry_price - 1
 
-        if (i + 1) % 5000 == 0:
-            print(f"    [{i+1}/{len(signals)}] forward returns computed...")
+            # 20-day return + max drawdown
+            if idx + 20 < len(dates_sorted):
+                fwd_20d = price_map[dates_sorted[idx + 20]] / entry_price - 1
+                # Max drawdown over 20-day window
+                window_prices = [price_map[dates_sorted[idx + j]] for j in range(1, 21)]
+                min_price = min(window_prices)
+                dd_20d = min_price / entry_price - 1
 
-    print(f"  → Forward returns: {updated} signals updated")
+            # 60-day return
+            if idx + 60 < len(dates_sorted):
+                fwd_60d = price_map[dates_sorted[idx + 60]] / entry_price - 1
+
+            # Update
+            await db.execute(
+                """
+                UPDATE technical_signals
+                SET fwd_return_1d = COALESCE($2, fwd_return_1d),
+                    fwd_return_5d = COALESCE($3, fwd_return_5d),
+                    fwd_return_20d = COALESCE($4, fwd_return_20d),
+                    fwd_return_60d = COALESCE($5, fwd_return_60d),
+                    fwd_max_drawdown_20d = COALESCE($6, fwd_max_drawdown_20d)
+                WHERE id = $1
+                """,
+                sig["id"],
+                _fmt(fwd_1d, 4), _fmt(fwd_5d, 4), _fmt(fwd_20d, 4),
+                _fmt(fwd_60d, 4), _fmt(dd_20d, 4),
+            )
+            updated += 1
+
+    print(f"  → Forward returns computed for {updated:,} signals")
     return {"updated": updated}
 
 
+# ====================================================================
+# VALIDATION REPORT
+# ====================================================================
+
 async def generate_accuracy_report(db: DatabasePool):
     """
-    Print a signal accuracy report showing forward returns by signal type.
-
-    This is the key output — it tells us whether our TA signals predict returns.
+    Comprehensive validation report testing ALL modules against forward returns.
     """
-    def _fmt(v):
-        """Format a numeric value or None."""
-        return f"{v:>7.2f}%" if v is not None else "    N/A"
-
-    def _fmt1(v):
-        """Format a numeric value with 1 decimal or None."""
-        return f"{v:>8.1f}%" if v is not None else "     N/A"
-
     print("\n" + "=" * 70)
-    print("  FINIAS TA SIGNAL ACCURACY REPORT")
+    print("  FINIAS TA SIGNAL VALIDATION REPORT — ALL 7 MODULES")
     print("=" * 70)
 
-    # Count total signals
     total = await db.fetchval("SELECT COUNT(*) FROM technical_signals")
-    with_returns = await db.fetchval(
+    with_fwd = await db.fetchval(
         "SELECT COUNT(*) FROM technical_signals WHERE fwd_return_20d IS NOT NULL"
     )
+    with_json = await db.fetchval(
+        "SELECT COUNT(*) FROM technical_signals WHERE full_signals_json != '{}'"
+    )
     print(f"\n  Total signals: {total:,}")
-    print(f"  With forward returns: {with_returns:,}")
+    print(f"  With forward returns: {with_fwd:,}")
+    print(f"  With full 7-module JSON: {with_json:,}")
 
-    if with_returns == 0:
-        print("  No forward returns computed yet. Run backfill first.")
-        return
+    # ---- Section 1: Trend Regime → Returns ----
+    print("\n" + "─" * 70)
+    print("  1. FORWARD RETURNS BY TREND REGIME")
+    print("─" * 70)
 
-    # === TREND REGIME ACCURACY ===
-    print(f"\n{'─' * 70}")
-    print("  FORWARD RETURNS BY TREND REGIME")
-    print(f"  (Does our trend classification predict direction?)")
-    print(f"{'─' * 70}")
-
-    rows = await db.fetch(
-        """
+    rows = await db.fetch("""
         SELECT trend_regime,
-               COUNT(*) as n,
-               ROUND((AVG(fwd_return_5d) * 100)::numeric, 2) as avg_5d,
-               ROUND((AVG(fwd_return_20d) * 100)::numeric, 2) as avg_20d,
-               ROUND((AVG(fwd_return_60d) * 100)::numeric, 2) as avg_60d,
-               ROUND((AVG(fwd_max_drawdown_20d) * 100)::numeric, 2) as avg_dd,
-               ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY fwd_return_20d) * 100)::numeric, 2) as median_20d
+            COUNT(*) as n,
+            ROUND((AVG(fwd_return_5d) * 100)::numeric, 2) as avg_5d,
+            ROUND((AVG(fwd_return_20d) * 100)::numeric, 2) as avg_20d,
+            ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY fwd_return_20d) * 100)::numeric, 2) as med_20d,
+            ROUND((AVG(fwd_return_60d) * 100)::numeric, 2) as avg_60d,
+            ROUND((AVG(fwd_max_drawdown_20d) * 100)::numeric, 2) as avg_dd
         FROM technical_signals
-        WHERE fwd_return_20d IS NOT NULL AND trend_regime IS NOT NULL
+        WHERE fwd_return_20d IS NOT NULL
         GROUP BY trend_regime
         ORDER BY avg_20d DESC
-        """
-    )
+    """)
 
-    print(f"\n  {'Regime':<22} {'N':>7} {'Avg 5d':>8} {'Avg 20d':>8} {'Med 20d':>8} {'Avg 60d':>8} {'Avg DD':>8}")
-    print(f"  {'─' * 22} {'─' * 7} {'─' * 8} {'─' * 8} {'─' * 8} {'─' * 8} {'─' * 8}")
+    print(f"\n  {'Regime':<26} {'N':>7} {'Avg 5d':>8} {'Avg 20d':>8} {'Med 20d':>8} {'Avg 60d':>8} {'Avg DD':>8}")
+    print(f"  {'─'*22} {'─'*7} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*8}")
     for r in rows:
-        print(f"  {r['trend_regime'] or 'unknown':<22} {r['n']:>7,} {_fmt(r['avg_5d'])} {_fmt(r['avg_20d'])} {_fmt(r['median_20d'])} {_fmt(r['avg_60d'])} {_fmt(r['avg_dd'])}")
+        print(f"  {r['trend_regime'] or 'N/A':<26} {r['n']:>7,} "
+              f"{_rfmt(r['avg_5d'])} {_rfmt(r['avg_20d'])} {_rfmt(r['med_20d'])} "
+              f"{_rfmt(r['avg_60d'])} {_rfmt(r['avg_dd'])}")
 
-    # === MOMENTUM DIVERGENCE ACCURACY ===
-    print(f"\n{'─' * 70}")
-    print("  FORWARD RETURNS BY DIVERGENCE TYPE")
-    print(f"  (Do our divergences predict reversals?)")
-    print(f"{'─' * 70}")
+    # ---- Section 2: Synthesis Setup → Returns ----
+    print("\n" + "─" * 70)
+    print("  2. FORWARD RETURNS BY SYNTHESIS SETUP TYPE")
+    print("  (Does the synthesis engine identify profitable setups?)")
+    print("─" * 70)
 
-    rows = await db.fetch(
-        """
-        SELECT divergence_type,
-               COUNT(*) as n,
-               ROUND((AVG(fwd_return_5d) * 100)::numeric, 2) as avg_5d,
-               ROUND((AVG(fwd_return_20d) * 100)::numeric, 2) as avg_20d,
-               ROUND((AVG(fwd_return_60d) * 100)::numeric, 2) as avg_60d
-        FROM technical_signals
-        WHERE fwd_return_20d IS NOT NULL AND divergence_type IS NOT NULL
-        GROUP BY divergence_type
-        ORDER BY n DESC
-        """
-    )
-
-    print(f"\n  {'Divergence':<22} {'N':>7} {'Avg 5d':>8} {'Avg 20d':>8} {'Avg 60d':>8}")
-    print(f"  {'─' * 22} {'─' * 7} {'─' * 8} {'─' * 8} {'─' * 8}")
-    for r in rows:
-        print(f"  {r['divergence_type'] or 'none':<22} {r['n']:>7,} {_fmt(r['avg_5d'])} {_fmt(r['avg_20d'])} {_fmt(r['avg_60d'])}")
-
-    # === TREND SCORE QUINTILE ACCURACY ===
-    print(f"\n{'─' * 70}")
-    print("  FORWARD RETURNS BY TREND SCORE QUINTILE")
-    print(f"  (Does higher trend score → higher returns?)")
-    print(f"{'─' * 70}")
-
-    rows = await db.fetch(
-        """
+    rows = await db.fetch("""
         SELECT
-            CASE
-                WHEN trend_score >= 0.4 THEN 'Q5 (strong bull)'
-                WHEN trend_score >= 0.1 THEN 'Q4 (bull)'
-                WHEN trend_score >= -0.1 THEN 'Q3 (neutral)'
-                WHEN trend_score >= -0.4 THEN 'Q2 (bear)'
-                ELSE 'Q1 (strong bear)'
-            END as quintile,
+            full_signals_json->'synthesis'->'setup'->>'type' as setup_type,
             COUNT(*) as n,
             ROUND((AVG(fwd_return_5d) * 100)::numeric, 2) as avg_5d,
             ROUND((AVG(fwd_return_20d) * 100)::numeric, 2) as avg_20d,
             ROUND((AVG(fwd_return_60d) * 100)::numeric, 2) as avg_60d
         FROM technical_signals
-        WHERE fwd_return_20d IS NOT NULL AND trend_score IS NOT NULL
-        GROUP BY quintile
-        ORDER BY quintile DESC
-        """
-    )
+        WHERE fwd_return_20d IS NOT NULL
+          AND full_signals_json != '{}'
+        GROUP BY setup_type
+        ORDER BY avg_20d DESC
+    """)
 
-    print(f"\n  {'Quintile':<22} {'N':>7} {'Avg 5d':>8} {'Avg 20d':>8} {'Avg 60d':>8}")
-    print(f"  {'─' * 22} {'─' * 7} {'─' * 8} {'─' * 8} {'─' * 8}")
+    print(f"\n  {'Setup':<26} {'N':>7} {'Avg 5d':>8} {'Avg 20d':>8} {'Avg 60d':>8}")
+    print(f"  {'─'*22} {'─'*7} {'─'*8} {'─'*8} {'─'*8}")
     for r in rows:
-        print(f"  {r['quintile']:<22} {r['n']:>7,} {_fmt(r['avg_5d'])} {_fmt(r['avg_20d'])} {_fmt(r['avg_60d'])}")
+        print(f"  {r['setup_type'] or 'none':<26} {r['n']:>7,} "
+              f"{_rfmt(r['avg_5d'])} {_rfmt(r['avg_20d'])} {_rfmt(r['avg_60d'])}")
 
-    # === MOMENTUM SCORE QUINTILE ACCURACY ===
-    print(f"\n{'─' * 70}")
-    print("  FORWARD RETURNS BY MOMENTUM SCORE QUINTILE")
-    print(f"  (Does higher momentum → higher returns?)")
-    print(f"{'─' * 70}")
+    # ---- Section 3: Synthesis Setup + Macro Regime → Excess Returns ----
+    print("\n" + "─" * 70)
+    print("  3. SYNTHESIS SETUP × MACRO REGIME → EXCESS RETURNS")
+    print("  (Does macro conditioning improve signal quality?)")
+    print("─" * 70)
 
-    rows = await db.fetch(
-        """
+    rows = await db.fetch("""
+        WITH spy AS (
+            SELECT signal_date, fwd_return_20d as spy_20d
+            FROM technical_signals WHERE symbol = $1
+        )
+        SELECT
+            t.macro_regime,
+            full_signals_json->'synthesis'->'setup'->>'type' as setup_type,
+            COUNT(*) as n,
+            ROUND((AVG(t.fwd_return_20d - s.spy_20d) * 100)::numeric, 2) as excess_20d
+        FROM technical_signals t
+        JOIN spy s ON t.signal_date = s.signal_date
+        WHERE t.fwd_return_20d IS NOT NULL
+          AND t.symbol != $1
+          AND t.full_signals_json != '{}'
+          AND t.macro_regime IS NOT NULL
+          AND full_signals_json->'synthesis'->'setup'->>'type' != 'none'
+        GROUP BY t.macro_regime, setup_type
+        HAVING COUNT(*) >= 30
+        ORDER BY t.macro_regime, excess_20d DESC
+    """, "SPY")
+
+    print(f"\n  {'Macro':<18} {'Setup':<26} {'N':>7} {'Excess 20d':>10}")
+    print(f"  {'─'*18} {'─'*22} {'─'*7} {'─'*10}")
+    current_macro = None
+    for r in rows:
+        if r["macro_regime"] != current_macro:
+            if current_macro:
+                print()
+            current_macro = r["macro_regime"]
+        print(f"  {r['macro_regime']:<18} {r['setup_type'] or 'none':<26} "
+              f"{r['n']:>7,} {_rfmt(r['excess_20d'])}")
+
+    # ---- Section 4: Conviction Score → Returns ----
+    print("\n" + "─" * 70)
+    print("  4. CONVICTION LEVEL → RETURNS")
+    print("  (Do high conviction signals outperform?)")
+    print("─" * 70)
+
+    rows = await db.fetch("""
+        WITH spy AS (
+            SELECT signal_date, fwd_return_20d as spy_20d
+            FROM technical_signals WHERE symbol = $1
+        )
+        SELECT
+            full_signals_json->'synthesis'->'conviction'->>'level' as conv_level,
+            COUNT(*) as n,
+            ROUND((AVG(t.fwd_return_20d) * 100)::numeric, 2) as avg_20d,
+            ROUND((AVG(t.fwd_return_20d - s.spy_20d) * 100)::numeric, 2) as excess_20d,
+            ROUND((SUM(CASE WHEN t.fwd_return_20d - s.spy_20d > 0 THEN 1 ELSE 0 END)::numeric
+                   / COUNT(*) * 100)::numeric, 1) as win_rate
+        FROM technical_signals t
+        JOIN spy s ON t.signal_date = s.signal_date
+        WHERE t.fwd_return_20d IS NOT NULL
+          AND t.symbol != $1
+          AND t.full_signals_json != '{}'
+        GROUP BY conv_level
+        ORDER BY excess_20d DESC
+    """, "SPY")
+
+    print(f"\n  {'Conviction':<18} {'N':>7} {'Avg 20d':>8} {'Excess':>8} {'Win Rate':>9}")
+    print(f"  {'─'*18} {'─'*7} {'─'*8} {'─'*8} {'─'*9}")
+    for r in rows:
+        print(f"  {r['conv_level'] or 'N/A':<18} {r['n']:>7,} "
+              f"{_rfmt(r['avg_20d'])} {_rfmt(r['excess_20d'])} "
+              f"{_rfmt(r['win_rate'], suffix='%')}")
+
+    # ---- Section 5: Volume Confirmation → Returns ----
+    print("\n" + "─" * 70)
+    print("  5. VOLUME CONFIRMATION → RETURNS")
+    print("  (Does volume confirmation improve signal quality?)")
+    print("─" * 70)
+
+    rows = await db.fetch("""
+        WITH spy AS (
+            SELECT signal_date, fwd_return_20d as spy_20d
+            FROM technical_signals WHERE symbol = $1
+        ),
+        binned AS (
+            SELECT t.*,
+                s.spy_20d,
+                CASE
+                    WHEN (full_signals_json->'volume'->>'volume_confirmation_score')::float > 0.2 THEN 'confirming'
+                    WHEN (full_signals_json->'volume'->>'volume_confirmation_score')::float < -0.2 THEN 'contradicting'
+                    ELSE 'neutral'
+                END as vol_bucket
+            FROM technical_signals t
+            JOIN spy s ON t.signal_date = s.signal_date
+            WHERE t.fwd_return_20d IS NOT NULL
+              AND t.symbol != $1
+              AND t.full_signals_json != '{}'
+              AND full_signals_json->'volume'->>'volume_confirmation_score' IS NOT NULL
+        )
+        SELECT vol_bucket,
+            COUNT(*) as n,
+            ROUND((AVG(fwd_return_20d - spy_20d) * 100)::numeric, 2) as excess_20d,
+            ROUND((SUM(CASE WHEN fwd_return_20d - spy_20d > 0 THEN 1 ELSE 0 END)::numeric
+                   / COUNT(*) * 100)::numeric, 1) as win_rate
+        FROM binned
+        GROUP BY vol_bucket
+        ORDER BY excess_20d DESC
+    """, "SPY")
+
+    print(f"\n  {'Volume':<18} {'N':>7} {'Excess 20d':>10} {'Win Rate':>9}")
+    print(f"  {'─'*18} {'─'*7} {'─'*10} {'─'*9}")
+    for r in rows:
+        print(f"  {r['vol_bucket']:<18} {r['n']:>7,} "
+              f"{_rfmt(r['excess_20d'])} {_rfmt(r['win_rate'], suffix='%')}")
+
+    # ---- Section 6: RS Regime → Returns ----
+    print("\n" + "─" * 70)
+    print("  6. RELATIVE STRENGTH REGIME → RETURNS")
+    print("  (Does RS improvement predict outperformance?)")
+    print("─" * 70)
+
+    rows = await db.fetch("""
+        WITH spy AS (
+            SELECT signal_date, fwd_return_20d as spy_20d
+            FROM technical_signals WHERE symbol = $1
+        )
+        SELECT
+            full_signals_json->'relative_strength'->>'rs_regime' as rs_regime,
+            COUNT(*) as n,
+            ROUND((AVG(t.fwd_return_20d - s.spy_20d) * 100)::numeric, 2) as excess_20d,
+            ROUND((SUM(CASE WHEN t.fwd_return_20d - s.spy_20d > 0 THEN 1 ELSE 0 END)::numeric
+                   / COUNT(*) * 100)::numeric, 1) as win_rate
+        FROM technical_signals t
+        JOIN spy s ON t.signal_date = s.signal_date
+        WHERE t.fwd_return_20d IS NOT NULL
+          AND t.symbol != $1
+          AND t.full_signals_json != '{}'
+          AND full_signals_json->'relative_strength'->>'rs_regime' IS NOT NULL
+        GROUP BY rs_regime
+        ORDER BY excess_20d DESC
+    """, "SPY")
+
+    print(f"\n  {'RS Regime':<18} {'N':>7} {'Excess 20d':>10} {'Win Rate':>9}")
+    print(f"  {'─'*18} {'─'*7} {'─'*10} {'─'*9}")
+    for r in rows:
+        print(f"  {r['rs_regime'] or 'N/A':<18} {r['n']:>7,} "
+              f"{_rfmt(r['excess_20d'])} {_rfmt(r['win_rate'], suffix='%')}")
+
+    # ---- Section 7: Squeeze → Returns ----
+    print("\n" + "─" * 70)
+    print("  7. SQUEEZE STATUS → RETURNS")
+    print("  (Do squeezes predict large moves?)")
+    print("─" * 70)
+
+    rows = await db.fetch("""
+        WITH spy AS (
+            SELECT signal_date, fwd_return_20d as spy_20d
+            FROM technical_signals WHERE symbol = $1
+        )
         SELECT
             CASE
-                WHEN momentum_score >= 0.4 THEN 'Q5 (strong bull)'
-                WHEN momentum_score >= 0.1 THEN 'Q4 (bull)'
-                WHEN momentum_score >= -0.1 THEN 'Q3 (neutral)'
-                WHEN momentum_score >= -0.4 THEN 'Q2 (bear)'
-                ELSE 'Q1 (strong bear)'
-            END as quintile,
+                WHEN (full_signals_json->'volatility'->'squeeze'->>'just_released')::boolean THEN 'just_released'
+                WHEN (full_signals_json->'volatility'->'squeeze'->>'active')::boolean THEN 'active_squeeze'
+                ELSE 'no_squeeze'
+            END as squeeze_status,
             COUNT(*) as n,
-            ROUND((AVG(fwd_return_5d) * 100)::numeric, 2) as avg_5d,
-            ROUND((AVG(fwd_return_20d) * 100)::numeric, 2) as avg_20d,
-            ROUND((AVG(fwd_return_60d) * 100)::numeric, 2) as avg_60d
-        FROM technical_signals
-        WHERE fwd_return_20d IS NOT NULL AND momentum_score IS NOT NULL
-        GROUP BY quintile
-        ORDER BY quintile DESC
-        """
-    )
+            ROUND((AVG(ABS(t.fwd_return_20d)) * 100)::numeric, 2) as avg_abs_20d,
+            ROUND((AVG(t.fwd_return_20d - s.spy_20d) * 100)::numeric, 2) as excess_20d
+        FROM technical_signals t
+        JOIN spy s ON t.signal_date = s.signal_date
+        WHERE t.fwd_return_20d IS NOT NULL
+          AND t.symbol != $1
+          AND t.full_signals_json != '{}'
+          AND full_signals_json->'volatility'->'squeeze'->>'active' IS NOT NULL
+        GROUP BY squeeze_status
+        ORDER BY avg_abs_20d DESC
+    """, "SPY")
 
-    print(f"\n  {'Quintile':<22} {'N':>7} {'Avg 5d':>8} {'Avg 20d':>8} {'Avg 60d':>8}")
-    print(f"  {'─' * 22} {'─' * 7} {'─' * 8} {'─' * 8} {'─' * 8}")
+    print(f"\n  {'Squeeze':<18} {'N':>7} {'Avg |20d|':>10} {'Excess 20d':>10}")
+    print(f"  {'─'*18} {'─'*7} {'─'*10} {'─'*10}")
     for r in rows:
-        print(f"  {r['quintile']:<22} {r['n']:>7,} {_fmt(r['avg_5d'])} {_fmt(r['avg_20d'])} {_fmt(r['avg_60d'])}")
+        print(f"  {r['squeeze_status']:<18} {r['n']:>7,} "
+              f"{_rfmt(r['avg_abs_20d'])} {_rfmt(r['excess_20d'])}")
 
-    # === HIT RATE ===
-    print(f"\n{'─' * 70}")
-    print("  HIT RATE (% of signals where 20d return matched predicted direction)")
-    print(f"{'─' * 70}")
+    # ---- Section 8: Action → Returns (The Ultimate Test) ----
+    print("\n" + "─" * 70)
+    print("  8. SYNTHESIS ACTION → RETURNS (THE ULTIMATE TEST)")
+    print("  (Do 'buy' signals make money? Do 'sell' signals lose?)")
+    print("─" * 70)
 
-    rows = await db.fetch(
-        """
-        SELECT trend_regime,
-               COUNT(*) as n,
-               SUM(CASE
-                   WHEN trend_regime IN ('strong_uptrend', 'uptrend') AND fwd_return_20d > 0 THEN 1
-                   WHEN trend_regime IN ('strong_downtrend', 'downtrend') AND fwd_return_20d < 0 THEN 1
-                   WHEN trend_regime = 'consolidation' AND ABS(fwd_return_20d) < 0.03 THEN 1
-                   ELSE 0
-               END) as hits,
-               ROUND(
-                   (SUM(CASE
-                       WHEN trend_regime IN ('strong_uptrend', 'uptrend') AND fwd_return_20d > 0 THEN 1
-                       WHEN trend_regime IN ('strong_downtrend', 'downtrend') AND fwd_return_20d < 0 THEN 1
-                       WHEN trend_regime = 'consolidation' AND ABS(fwd_return_20d) < 0.03 THEN 1
-                       ELSE 0
-                   END)::numeric / NULLIF(COUNT(*), 0) * 100)::numeric, 1
-               ) as hit_rate
-        FROM technical_signals
-        WHERE fwd_return_20d IS NOT NULL AND trend_regime IS NOT NULL
-        GROUP BY trend_regime
-        ORDER BY hit_rate DESC
-        """
-    )
+    rows = await db.fetch("""
+        WITH spy AS (
+            SELECT signal_date, fwd_return_20d as spy_20d
+            FROM technical_signals WHERE symbol = $1
+        )
+        SELECT
+            full_signals_json->'synthesis'->>'action' as action,
+            COUNT(*) as n,
+            ROUND((AVG(t.fwd_return_20d) * 100)::numeric, 2) as avg_20d,
+            ROUND((AVG(t.fwd_return_20d - s.spy_20d) * 100)::numeric, 2) as excess_20d,
+            ROUND((SUM(CASE WHEN t.fwd_return_20d > 0 THEN 1 ELSE 0 END)::numeric
+                   / COUNT(*) * 100)::numeric, 1) as win_rate,
+            ROUND((AVG(fwd_max_drawdown_20d) * 100)::numeric, 2) as avg_dd
+        FROM technical_signals t
+        JOIN spy s ON t.signal_date = s.signal_date
+        WHERE t.fwd_return_20d IS NOT NULL
+          AND t.symbol != $1
+          AND t.full_signals_json != '{}'
+          AND full_signals_json->'synthesis'->>'action' IS NOT NULL
+        GROUP BY action
+        ORDER BY excess_20d DESC
+    """, "SPY")
 
-    print(f"\n  {'Regime':<22} {'N':>7} {'Hits':>7} {'Hit Rate':>9}")
-    print(f"  {'─' * 22} {'─' * 7} {'─' * 7} {'─' * 9}")
+    print(f"\n  {'Action':<18} {'N':>7} {'Avg 20d':>8} {'Excess':>8} {'Win Rate':>9} {'Avg DD':>8}")
+    print(f"  {'─'*18} {'─'*7} {'─'*8} {'─'*8} {'─'*9} {'─'*8}")
     for r in rows:
-        print(f"  {r['trend_regime'] or 'unknown':<22} {r['n']:>7,} {r['hits']:>7,} {_fmt1(r['hit_rate'])}")
+        print(f"  {r['action'] or 'N/A':<18} {r['n']:>7,} "
+              f"{_rfmt(r['avg_20d'])} {_rfmt(r['excess_20d'])} "
+              f"{_rfmt(r['win_rate'], suffix='%')} {_rfmt(r['avg_dd'])}")
 
-    print(f"\n{'=' * 70}")
+    print("\n" + "=" * 70)
 
 
-async def _load_all_bars(
-    db: DatabasePool,
-    symbols: list[str],
-    from_date: date,
-    to_date: date,
-) -> dict[str, pd.DataFrame]:
-    """Load all price data as DataFrames, partitioned by symbol."""
-    rows = await db.fetch(
-        """
-        SELECT symbol, trade_date, open, high, low, close, volume
-        FROM market_data_daily
-        WHERE symbol = ANY($1) AND trade_date BETWEEN $2 AND $3
-        ORDER BY symbol, trade_date ASC
-        """,
-        symbols, from_date, to_date,
-    )
+def _rfmt(val, suffix="%"):
+    """Format a report value."""
+    if val is None:
+        return f"{'N/A':>8}"
+    return f"{val:>7.2f}{suffix}"
 
-    result = {}
-    current_symbol = None
-    current_rows = []
 
-    for row in rows:
-        sym = row["symbol"]
-        if sym != current_symbol:
-            if current_symbol and current_rows:
-                df = pd.DataFrame(current_rows)
-                for col in ["open", "high", "low", "close"]:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype(int)
-                result[current_symbol] = df
-            current_symbol = sym
-            current_rows = []
-        current_rows.append({
-            "trade_date": row["trade_date"],
-            "open": row["open"],
-            "high": row["high"],
-            "low": row["low"],
-            "close": row["close"],
-            "volume": row["volume"],
-        })
-
-    # Last symbol
-    if current_symbol and current_rows:
-        df = pd.DataFrame(current_rows)
-        for col in ["open", "high", "low", "close"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype(int)
-        result[current_symbol] = df
-
-    return result
-
+# ====================================================================
+# MAIN
+# ====================================================================
 
 async def main():
-    """Main entry point."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
@@ -576,15 +872,22 @@ async def main():
         if idx + 1 < len(sys.argv):
             weeks = int(sys.argv[idx + 1])
 
+    # Parse --step N
+    step_days = STEP_DAYS
+    if "--step" in sys.argv:
+        idx = sys.argv.index("--step")
+        if idx + 1 < len(sys.argv):
+            step_days = int(sys.argv[idx + 1])
+
     # Parse --symbols SYM1 SYM2
     symbols = None
     if "--symbols" in sys.argv:
         idx = sys.argv.index("--symbols")
         symbols = [s.upper() for s in sys.argv[idx + 1:] if not s.startswith("--")]
 
-    print("╔══════════════════════════════════════╗")
-    print("║   FINIAS TA Signal Backfill          ║")
-    print("╚══════════════════════════════════════╝\n")
+    print("╔══════════════════════════════════════════╗")
+    print("║   FINIAS TA Signal Backfill — 7 Modules  ║")
+    print("╚══════════════════════════════════════════╝\n")
 
     db = DatabasePool()
     await db.initialize()
@@ -594,8 +897,10 @@ async def main():
         if report_only:
             await generate_accuracy_report(db)
         else:
-            # Step 1: Backfill signals
-            result = await backfill_signals(db, weeks=weeks, symbols=symbols)
+            # Step 1: Backfill signals with all 7 modules
+            result = await backfill_signals(
+                db, weeks=weeks, step_days=step_days, symbols=symbols,
+            )
             print(f"\n  Backfill: {result['signals_stored']:,} signals for "
                   f"{result['symbols']} symbols over {result['dates_computed']} dates")
 
@@ -603,7 +908,7 @@ async def main():
             fwd = await compute_forward_returns(db)
             print(f"  Forward returns: {fwd['updated']:,} signals updated")
 
-            # Step 3: Generate accuracy report
+            # Step 3: Generate validation report
             await generate_accuracy_report(db)
 
     finally:
