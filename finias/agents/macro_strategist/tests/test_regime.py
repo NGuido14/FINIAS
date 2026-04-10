@@ -170,5 +170,19 @@ def test_binding_constraint_identification():
 def test_classify_primary_regime_crisis():
     """High stress should produce crisis regime."""
     vol = _make_vol(regime="extreme", risk_score=0.9)
-    regime, confidence = _classify_primary_regime(composite=-0.5, stress=0.85, vol=vol)
+    regime, confidence = _classify_primary_regime(composite=-0.5, stress=0.75, vol=vol)
     assert regime == MarketRegime.CRISIS
+
+
+def test_classify_primary_regime_risk_on():
+    """Positive composite above threshold should produce risk_on."""
+    vol = _make_vol(regime="normal", risk_score=0.2)
+    regime, confidence = _classify_primary_regime(composite=0.12, stress=0.1, vol=vol)
+    assert regime == MarketRegime.RISK_ON
+
+
+def test_classify_primary_regime_risk_off():
+    """Negative composite below threshold should produce risk_off."""
+    vol = _make_vol(regime="elevated", risk_score=0.5)
+    regime, confidence = _classify_primary_regime(composite=-0.20, stress=0.3, vol=vol)
+    assert regime == MarketRegime.RISK_OFF

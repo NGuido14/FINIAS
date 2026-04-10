@@ -51,6 +51,51 @@ class TestMeanReversionSetup:
         assert risk_on.macro_alignment == "opposed"
         assert crisis.conviction_score > risk_on.conviction_score
 
+    def test_high_stress_boosts_mean_reversion(self):
+        """High macro stress should upgrade mean-reversion alignment."""
+        sigs = _base_signals()
+        sigs["trend"]["trend_regime"] = "strong_downtrend"
+        sigs["trend"]["trend_score"] = -0.6
+        sigs["momentum"]["divergence"]["type"] = "bullish"
+        sigs["volume"]["obv"]["divergence"] = "bullish"
+        sigs["volume"]["regime_volume_trend"]["direction"] = "contracting"
+
+        # Use "unknown" regime so primary alignment is neutral, then stress upgrades it
+        with_stress = synthesize_signals(**sigs, macro_regime="unknown", macro_stress=0.6)
+        without_stress = synthesize_signals(**sigs, macro_regime="unknown", macro_stress=0.1)
+
+        assert with_stress.macro_alignment == "aligned"
+        assert without_stress.macro_alignment == "neutral"
+        assert with_stress.conviction_score > without_stress.conviction_score
+
+    def test_extreme_vol_reduces_conviction(self):
+        """Extreme volatility should downgrade aligned signals."""
+        sigs = _base_signals()
+        sigs["trend"]["trend_regime"] = "strong_downtrend"
+        sigs["trend"]["trend_score"] = -0.6
+        sigs["momentum"]["divergence"]["type"] = "bullish"
+        sigs["volume"]["obv"]["divergence"] = "bullish"
+        sigs["volume"]["regime_volume_trend"]["direction"] = "contracting"
+
+        extreme = synthesize_signals(**sigs, macro_regime="crisis", macro_volatility="extreme")
+        normal = synthesize_signals(**sigs, macro_regime="crisis", macro_volatility="normal")
+
+        # Extreme vol should downgrade from aligned to neutral
+        assert extreme.macro_alignment == "neutral"
+        assert normal.macro_alignment == "aligned"
+
+    def test_transition_does_not_align_mean_reversion(self):
+        """Transition + mean_reversion should NOT be aligned (only +0.02% excess = noise)."""
+        sigs = _base_signals()
+        sigs["trend"]["trend_regime"] = "strong_downtrend"
+        sigs["trend"]["trend_score"] = -0.6
+        sigs["momentum"]["divergence"]["type"] = "bullish"
+        sigs["volume"]["obv"]["divergence"] = "bullish"
+        sigs["volume"]["regime_volume_trend"]["direction"] = "contracting"
+
+        result = synthesize_signals(**sigs, macro_regime="transition")
+        assert result.macro_alignment == "neutral"  # NOT aligned
+
 
 class TestTrendContinuation:
     def test_uptrend_with_confirmation(self):
@@ -91,6 +136,18 @@ class TestDistributionWarning:
         result = synthesize_signals(**sigs)
         assert result.setup_type == "distribution_warning"
 
+    def test_risk_on_aligns_distribution_warning(self):
+        """Risk_on + distribution_warning should be aligned (+2.26% excess)."""
+        sigs = _base_signals()
+        sigs["trend"]["trend_regime"] = "uptrend"
+        sigs["trend"]["trend_score"] = 0.5
+        sigs["momentum"]["divergence"]["type"] = "bearish"
+        sigs["relative_strength"]["rs_regime"] = "deteriorating"
+
+        result = synthesize_signals(**sigs, macro_regime="risk_on")
+        assert result.setup_type == "distribution_warning"
+        assert result.macro_alignment == "aligned"
+
 
 class TestConfluence:
     def test_all_bullish(self):
@@ -102,9 +159,11 @@ class TestConfluence:
         sigs["volatility"]["vol_score"] = 0.5
 
         result = synthesize_signals(**sigs)
-        assert result.bullish_dimensions == 5
+        # Only 3 validated dimensions count (trend, momentum, rs)
+        # Volume and volatility are excluded from confluence counting
+        assert result.bullish_dimensions == 3
         assert result.bearish_dimensions == 0
-        assert result.confluence_score == 1.0
+        assert result.confluence_score == 1.0  # 3/3 = 1.0
 
     def test_mixed_signals(self):
         sigs = _base_signals()

@@ -1,23 +1,29 @@
 """
 Signal Confluence Synthesis Engine
 
-This is the intelligence layer that transforms 6 independent computation
-modules into actionable conviction scores. Every weighting and threshold
-in this module is derived from empirical backtest results on 99k signals
-with forward returns across 2022-2025.
+This is the intelligence layer that transforms computation modules into
+actionable conviction scores. Weights and thresholds are calibrated against
+508,766 signals with forward returns across 2022-2025, using real macro
+regime labels from the 11-module computation pipeline.
 
-KEY EMPIRICAL FINDINGS ENCODED HERE:
-  1. Mean-reversion dominates at stock level (strong_downtrend → +0.45% excess)
-  2. Macro regime flips the optimal strategy (crisis = mean-revert, risk_on = trend-follow)
-  3. Divergences add real alpha only in downtrends (+1.04% excess)
-  4. Volume exhaustion (contracting vol in downtrend) identifies better mean-reversion entries
-  5. RS improvement in downtrend = early reversal signal
-  6. Multiple independent dimensions agreeing = higher conviction
+VALIDATED FINDINGS (508k signals, real macro labels):
+  1. Mean-reversion in risk_off: +0.86% excess over SPY (3,693 obs)
+  2. Trend continuation in risk_on: +1.60% excess (4,998 obs)
+  3. Buy/sell action spread: +0.48%/20d across all signals
+  4. RS "leading" predicts continued outperformance: +0.18% excess
+  5. Conviction scoring directionally correct (high > moderate > low)
+  6. Stress index predicts drawdowns (correlation -0.256)
 
-The synthesis engine does NOT predict direction. It measures:
-  - CONFLUENCE: How many independent dimensions agree?
-  - CONVICTION: How confident should we be based on empirical hit rates?
-  - SETUP TYPE: Mean-reversion, trend-continuation, or squeeze-breakout?
+NOT VALIDATED (excluded from action weighting):
+  - Volume confirmation: zero predictive power on daily bars
+  - Squeeze detection: doesn't predict larger moves
+  - Distribution warnings: underperform "no setup" in most regimes
+  - Trend continuation: underperforms "no setup" except in risk_on
+
+The synthesis engine measures:
+  - CONFLUENCE: How many validated dimensions agree?
+  - CONVICTION: Confidence based on empirical hit rates
+  - SETUP TYPE: Mean-reversion, trend-continuation, or squeeze-breakout
   - MACRO CONDITIONING: Which strategy does the macro environment favor?
 """
 
@@ -103,6 +109,9 @@ def synthesize_signals(
     volatility: dict,
     symbol: str = "",
     macro_regime: str = "unknown",
+    macro_binding: str = None,
+    macro_volatility: str = None,
+    macro_stress: float = None,
 ) -> SignalSynthesis:
     """
     Synthesize all 6 computation modules into a single actionable signal.
@@ -139,8 +148,8 @@ def synthesize_signals(
     # Step 2: Classify the setup type
     _classify_setup(result, trend, momentum, volume, relative_strength, volatility, macro_regime)
 
-    # Step 3: Apply macro conditioning
-    _apply_macro_conditioning(result, macro_regime)
+    # Step 3: Apply macro conditioning (uses regime + sub-dimensions)
+    _apply_macro_conditioning(result, macro_regime, macro_binding, macro_volatility, macro_stress)
 
     # Step 4: Compute conviction from confluence + macro alignment
     _compute_conviction(result)
@@ -152,26 +161,39 @@ def synthesize_signals(
 
 
 def _count_confluence(result: SignalSynthesis):
-    """Count how many independent dimensions are bullish vs bearish."""
+    """
+    Count how many VALIDATED dimensions are bullish vs bearish.
+
+    Only dimensions with empirically-proven predictive power are counted:
+      - trend_score: validated (mean-reversion pattern confirmed)
+      - momentum_score: validated (divergences add alpha in downtrends)
+      - rs_score: validated (RS "leading" = +0.18% excess)
+
+    Excluded from confluence (zero predictive power on daily bars):
+      - volume_score: confirming/contradicting volume doesn't predict returns
+      - vol_score: squeeze status doesn't predict move magnitude
+
+    These modules still COMPUTE and DISPLAY for context, but they do NOT
+    influence the buy/sell decision.
+    """
     threshold = 0.15  # Must exceed this to count as directional
 
-    scores = [
+    # Only validated dimensions count toward confluence
+    validated_scores = [
         result.trend_score,
         result.momentum_score,
-        result.volume_score,
         result.rs_score,
-        result.vol_score,
     ]
 
-    for s in scores:
+    for s in validated_scores:
         if s > threshold:
             result.bullish_dimensions += 1
         elif s < -threshold:
             result.bearish_dimensions += 1
 
     # Confluence score: net agreement normalized to -1 to +1
-    total = max(result.bullish_dimensions + result.bearish_dimensions, 1)
-    result.confluence_score = (result.bullish_dimensions - result.bearish_dimensions) / 5.0
+    # Denominator is 3 (number of validated dimensions)
+    result.confluence_score = (result.bullish_dimensions - result.bearish_dimensions) / 3.0
 
 
 def _classify_setup(
@@ -290,30 +312,50 @@ def _classify_setup(
     result.setup_description = "No high-conviction setup identified"
 
 
-def _apply_macro_conditioning(result: SignalSynthesis, macro_regime: str):
+def _apply_macro_conditioning(
+    result: SignalSynthesis,
+    macro_regime: str,
+    macro_binding: str = None,
+    macro_volatility: str = None,
+    macro_stress: float = None,
+):
     """
-    Apply macro conditioning based on empirical backtest findings.
+    Apply macro conditioning using regime + richer sub-dimensions.
 
-    Crisis + mean_reversion_buy = ALIGNED (backtest: +4.36% excess)
-    Risk_on + trend_continuation = ALIGNED (backtest: +0.51% excess)
-    Crisis + trend_continuation = OPPOSED (backtest: -7.86% excess)
-    Risk_on + mean_reversion_buy = OPPOSED (backtest: -1.34% excess)
+    Primary regime provides the coarse filter (recalibrated thresholds).
+    Sub-dimensions provide granularity:
+      - binding_constraint: inflation-bound vs growth-bound environments
+        differ in which TA signals work
+      - volatility_regime: signal reliability drops in extreme vol
+      - stress_index: high stress predicts drawdowns (correlation -0.256)
+
+    Empirical findings from 508k-signal validation (REAL macro labels):
+      Risk_off + mean_reversion_buy = +0.86% excess (3,693 obs)
+      Risk_on + trend_continuation = +1.60% excess (4,998 obs)
+      Risk_on + distribution_warning = +2.26% excess (1,676 obs)
+      Transition + mean_reversion_buy = +0.02% (noise — removed from aligned)
+      Transition + distribution_warning = -0.51% (harmful — removed from aligned)
+      Risk_off + distribution_warning = -0.30% (harmful — added to opposed)
     """
     setup = result.setup_type
 
-    # Define alignment rules from backtest
+    # === Primary regime alignment (from 508k-signal validation with real macro labels) ===
+    # Risk_off + mean_reversion: +0.86% excess (3,693 obs) — VALIDATED
+    # Risk_on + trend_continuation: +1.60% excess (4,998 obs) — VALIDATED
+    # Risk_on + distribution_warning: +2.26% excess (1,676 obs) — VALIDATED (surprising)
+    # Transition combos removed: mean_reversion +0.02% (noise), distribution -0.51% (harmful)
     aligned_combos = {
         ("crisis", "mean_reversion_buy"),
         ("risk_off", "mean_reversion_buy"),
         ("risk_on", "trend_continuation"),
-        ("moderate_bull", "trend_continuation"),
+        ("risk_on", "distribution_warning"),
     }
 
     opposed_combos = {
         ("crisis", "trend_continuation"),
-        ("crisis", "exhaustion_sell"),  # Don't sell into crisis panic
+        ("crisis", "exhaustion_sell"),
         ("risk_on", "mean_reversion_buy"),
-        ("risk_on", "distribution_warning"),
+        ("risk_off", "distribution_warning"),   # -0.30% excess — validated as harmful
     }
 
     key = (macro_regime, setup)
@@ -322,10 +364,28 @@ def _apply_macro_conditioning(result: SignalSynthesis, macro_regime: str):
         result.macro_alignment = "aligned"
     elif key in opposed_combos:
         result.macro_alignment = "opposed"
-    elif setup in ("squeeze_breakout",):
-        result.macro_alignment = "neutral"  # Squeezes work in any environment
     else:
         result.macro_alignment = "neutral"
+
+    # === Sub-dimension adjustments ===
+
+    # High stress environment: boost mean-reversion, penalize trend-following
+    if macro_stress is not None and macro_stress > 0.5:
+        if setup == "mean_reversion_buy":
+            result.macro_alignment = "aligned"  # Upgrade to aligned in stress
+        elif setup == "trend_continuation":
+            if result.macro_alignment != "opposed":
+                result.macro_alignment = "opposed"  # Downgrade in stress
+
+    # Extreme volatility: reduce conviction on all setups (unreliable signals)
+    if macro_volatility in ("extreme",):
+        if result.macro_alignment == "aligned":
+            result.macro_alignment = "neutral"  # Downgrade — signals unreliable
+
+    # Inflation-bound regime: distribution warnings are more meaningful
+    # (inflation erodes corporate margins, distribution = smart money selling)
+    if macro_binding == "inflation" and setup == "distribution_warning":
+        result.macro_alignment = "aligned"
 
 
 def _compute_conviction(result: SignalSynthesis):
@@ -341,11 +401,16 @@ def _compute_conviction(result: SignalSynthesis):
     score += min(net_dims / 5.0, 0.4)
 
     # Setup type contribution (0-0.3)
+    # Weights reflect 508k-signal validation results:
+    #   mean_reversion_buy: only setup that outperforms "none" (+1.16% vs +1.01%)
+    #   trend_continuation: underperforms "none" (+0.78% vs +1.01%) EXCEPT in risk_on
+    #   squeeze_breakout: no predictive edge over "none" (+0.97% vs +1.01%)
+    #   distribution_warning: underperforms "none" (+0.72% vs +1.01%) EXCEPT in risk_on
     setup_weights = {
-        "mean_reversion_buy": 0.3,
-        "trend_continuation": 0.2,
-        "squeeze_breakout": 0.25,
-        "distribution_warning": 0.2,
+        "mean_reversion_buy": 0.3,   # validated — only consistently outperforming setup
+        "trend_continuation": 0.1,   # reduced — only works in risk_on
+        "squeeze_breakout": 0.1,     # reduced — no edge over baseline
+        "distribution_warning": 0.1, # reduced — only works in risk_on (surprisingly)
         "exhaustion_sell": 0.15,
         "none": 0.0,
     }

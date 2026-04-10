@@ -162,8 +162,9 @@ class TechnicalAnalyst(BaseAgent):
 
                 ta_vol = analyze_ta_volatility(df, symbol=symbol)
 
-                # Read macro regime from Redis for signal conditioning
-                current_macro = await self._get_macro_regime()
+                # Read full macro context from Redis once per refresh (not per-symbol)
+                macro_ctx = await self._get_macro_context()
+                current_macro = macro_ctx["regime"]
 
                 # Synthesize all dimensions into actionable signal
                 synthesis = synthesize_signals(
@@ -175,6 +176,9 @@ class TechnicalAnalyst(BaseAgent):
                     volatility=ta_vol.to_dict(),
                     symbol=symbol,
                     macro_regime=current_macro,
+                    macro_binding=macro_ctx.get("binding"),
+                    macro_volatility=macro_ctx.get("volatility"),
+                    macro_stress=macro_ctx.get("stress"),
                 )
 
                 all_signals[symbol] = {
@@ -282,6 +286,34 @@ class TechnicalAnalyst(BaseAgent):
         except Exception:
             pass
         return "unknown"
+
+    async def _get_macro_context(self) -> dict:
+        """
+        Read full macro context from Redis for richer signal conditioning.
+        Returns dict with regime, binding, volatility, cycle_phase, composite, stress.
+        """
+        default = {
+            "regime": "unknown", "binding": None, "volatility": None,
+            "cycle_phase": None, "composite": None, "stress": None,
+        }
+        if self.state is None:
+            return default
+        try:
+            regime_data = await self.state.get_regime()
+            if not regime_data:
+                return default
+            regime_info = regime_data.get("regime", {})
+            key_levels = regime_data.get("key_levels", {})
+            return {
+                "regime": regime_info.get("primary", "unknown"),
+                "binding": regime_data.get("binding_constraint"),
+                "volatility": regime_info.get("volatility"),
+                "cycle_phase": regime_info.get("cycle_phase"),
+                "composite": key_levels.get("composite_score"),
+                "stress": key_levels.get("stress_index"),
+            }
+        except Exception:
+            return default
 
     def _build_summary(self, all_signals: dict) -> dict:
         """Build aggregate summary across all analyzed symbols."""
@@ -422,15 +454,25 @@ class TechnicalAnalyst(BaseAgent):
         today = date.today()
         persisted = 0
 
-        # Read current macro regime from Redis for cross-referencing
-        current_macro_regime = None
+        # Read full macro context from Redis for cross-referencing
+        macro_ctx = {"regime": None, "binding": None, "volatility": None,
+                     "cycle_phase": None, "composite": None, "stress": None}
         try:
             if self.state:
                 regime_data = await self.state.get_regime()
                 if regime_data:
-                    current_macro_regime = regime_data.get("regime", {}).get("primary")
+                    regime_info = regime_data.get("regime", {})
+                    key_levels = regime_data.get("key_levels", {})
+                    macro_ctx = {
+                        "regime": regime_info.get("primary"),
+                        "binding": regime_data.get("binding_constraint"),
+                        "volatility": regime_info.get("volatility"),
+                        "cycle_phase": regime_info.get("cycle_phase"),
+                        "composite": key_levels.get("composite_score"),
+                        "stress": key_levels.get("stress_index"),
+                    }
         except Exception:
-            pass  # Non-blocking — persist without macro regime if unavailable
+            pass  # Non-blocking
 
         try:
             for symbol, sig in all_signals.items():
@@ -452,9 +494,12 @@ class TechnicalAnalyst(BaseAgent):
                         trend_regime, trend_score, adx, ma_alignment, ichimoku_signal, trend_maturity,
                         momentum_score, rsi_14, rsi_zone, macd_direction, macd_cross, divergence_type,
                         nearest_support, nearest_resistance, risk_reward_ratio,
-                        full_signals_json, macro_regime
+                        full_signals_json, macro_regime,
+                        macro_binding, macro_volatility, macro_cycle_phase,
+                        macro_composite, macro_stress
                     ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                        $20, $21, $22, $23, $24
                     )
                     ON CONFLICT (symbol, signal_date) DO UPDATE SET
                         trend_regime = EXCLUDED.trend_regime,
@@ -473,7 +518,12 @@ class TechnicalAnalyst(BaseAgent):
                         nearest_resistance = EXCLUDED.nearest_resistance,
                         risk_reward_ratio = EXCLUDED.risk_reward_ratio,
                         full_signals_json = EXCLUDED.full_signals_json,
-                        macro_regime = EXCLUDED.macro_regime
+                        macro_regime = EXCLUDED.macro_regime,
+                        macro_binding = EXCLUDED.macro_binding,
+                        macro_volatility = EXCLUDED.macro_volatility,
+                        macro_cycle_phase = EXCLUDED.macro_cycle_phase,
+                        macro_composite = EXCLUDED.macro_composite,
+                        macro_stress = EXCLUDED.macro_stress
                     """,
                     symbol, today,
                     trend.get("trend_regime"),
@@ -492,7 +542,12 @@ class TechnicalAnalyst(BaseAgent):
                     levels.get("nearest_resistance"),
                     min(levels.get("risk_reward_ratio") or 0, 999.99),
                     json.dumps(full_json, default=str),
-                    current_macro_regime,
+                    macro_ctx["regime"],       # $19
+                    macro_ctx["binding"],      # $20
+                    macro_ctx["volatility"],   # $21
+                    macro_ctx["cycle_phase"],  # $22
+                    macro_ctx["composite"],    # $23
+                    macro_ctx["stress"],       # $24
                 )
                 persisted += 1
 
