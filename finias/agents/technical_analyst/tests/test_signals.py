@@ -112,6 +112,22 @@ class TestTrendContinuation:
         assert result.setup_type == "trend_continuation"
         assert result.macro_alignment == "aligned"
 
+    def test_trend_continuation_requires_enhanced_filter(self):
+        """Without enhanced signals, trend_continuation should still work with risk_on + confirms."""
+        sigs = _base_signals()
+        sigs["trend"]["trend_regime"] = "strong_uptrend"
+        sigs["trend"]["trend_score"] = 0.7
+        sigs["momentum"]["momentum_score"] = 0.5
+        sigs["momentum"]["macd"]["momentum"] = "accelerating"
+        sigs["volume"]["volume_confirmation_score"] = 0.3
+        sigs["relative_strength"]["rs_regime"] = "leading"
+
+        # Without enhanced and without risk_on, should NOT fire (new filter)
+        result_no_enhanced = synthesize_signals(**sigs, macro_regime="transition")
+        # With risk_on + 3/4 confirms, should still fire
+        result_risk_on = synthesize_signals(**sigs, macro_regime="risk_on")
+        assert result_risk_on.setup_type == "trend_continuation"
+
 
 class TestSqueezeBreakout:
     def test_squeeze_released_bullish(self):

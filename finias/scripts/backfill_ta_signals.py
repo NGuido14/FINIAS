@@ -46,6 +46,7 @@ from finias.agents.technical_analyst.computations.relative_strength import (
 from finias.agents.technical_analyst.computations.ta_volatility import (
     analyze_volatility as analyze_ta_volatility,
 )
+from finias.agents.technical_analyst.computations.enhanced import compute_enhanced_signals
 from finias.agents.technical_analyst.computations.signals import synthesize_signals
 
 DEFAULT_WEEKS = 208  # ~4 years (full history)
@@ -246,7 +247,12 @@ def _compute_all_modules(
             # Module 6: Volatility
             ta_vol = analyze_ta_volatility(df, symbol=symbol)
 
-            # Module 7: Synthesis (needs macro regime)
+            # Module 7: Enhanced signals (research-backed)
+            enhanced = compute_enhanced_signals(
+                df, symbol=symbol, daily_trend_regime=trend.trend_regime,
+            )
+
+            # Module 8: Synthesis (needs macro regime + enhanced signals)
             synthesis = synthesize_signals(
                 trend=trend.to_dict(),
                 momentum=momentum.to_dict(),
@@ -256,6 +262,7 @@ def _compute_all_modules(
                 volatility=ta_vol.to_dict(),
                 symbol=symbol,
                 macro_regime=macro_regime,
+                enhanced=enhanced.to_dict(),
             )
 
             close_price = float(df["close"].iloc[-1])
@@ -269,6 +276,7 @@ def _compute_all_modules(
                 "volume": vol.to_dict(),
                 "relative_strength": rs.to_dict(),
                 "volatility": ta_vol.to_dict(),
+                "enhanced": enhanced.to_dict(),
                 "synthesis": synthesis.to_dict(),
             })
 

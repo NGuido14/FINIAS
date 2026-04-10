@@ -43,6 +43,7 @@ from finias.agents.technical_analyst.computations.relative_strength import (
     SECTOR_ETF_MAP,
 )
 from finias.agents.technical_analyst.computations.ta_volatility import analyze_volatility as analyze_ta_volatility
+from finias.agents.technical_analyst.computations.enhanced import compute_enhanced_signals
 from finias.agents.technical_analyst.computations.signals import synthesize_signals
 
 logger = logging.getLogger("finias.agent.technical_analyst")
@@ -162,6 +163,11 @@ class TechnicalAnalyst(BaseAgent):
 
                 ta_vol = analyze_ta_volatility(df, symbol=symbol)
 
+                # Enhanced signals (research-backed: ATR, RSI2, 52wk high, weekly, acceleration)
+                enhanced = compute_enhanced_signals(
+                    df, symbol=symbol, daily_trend_regime=trend.trend_regime,
+                )
+
                 # Read full macro context from Redis once per refresh (not per-symbol)
                 macro_ctx = await self._get_macro_context()
                 current_macro = macro_ctx["regime"]
@@ -179,6 +185,7 @@ class TechnicalAnalyst(BaseAgent):
                     macro_binding=macro_ctx.get("binding"),
                     macro_volatility=macro_ctx.get("volatility"),
                     macro_stress=macro_ctx.get("stress"),
+                    enhanced=enhanced.to_dict(),
                 )
 
                 all_signals[symbol] = {
@@ -188,6 +195,7 @@ class TechnicalAnalyst(BaseAgent):
                     "volume": vol.to_dict(),
                     "relative_strength": rs.to_dict(),
                     "volatility": ta_vol.to_dict(),
+                    "enhanced": enhanced.to_dict(),
                     "synthesis": synthesis.to_dict(),
                 }
             except Exception as e:
@@ -434,6 +442,7 @@ class TechnicalAnalyst(BaseAgent):
                     "volume": sig.get("volume", {}),
                     "relative_strength": sig.get("relative_strength", {}),
                     "volatility": sig.get("volatility", {}),
+                    "enhanced": sig.get("enhanced", {}),
                     "synthesis": sig.get("synthesis", {}),
                 }
 
@@ -485,6 +494,11 @@ class TechnicalAnalyst(BaseAgent):
                     "trend": trend,
                     "momentum": mom,
                     "levels": levels,
+                    "volume": sig.get("volume", {}),
+                    "relative_strength": sig.get("relative_strength", {}),
+                    "volatility": sig.get("volatility", {}),
+                    "enhanced": sig.get("enhanced", {}),
+                    "synthesis": sig.get("synthesis", {}),
                 }
 
                 await self.cache.db.execute(
